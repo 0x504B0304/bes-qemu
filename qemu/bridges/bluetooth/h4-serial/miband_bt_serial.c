@@ -23,12 +23,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
-struct pollfd { int fd; short events, revents; };
-#define POLLIN 1
-#define POLLOUT 2
-#define POLLERR 4
-#define POLLHUP 8
-#define POLLNVAL 16
+#ifdef MIBAND_SERIAL_STANDALONE
+#include <winsock2.h>
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC O_NOINHERIT
+#endif
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -499,7 +499,11 @@ MiBandBtSerial *miband_serial_start(int fd, unsigned rate, const char *trace_pat
     pthread_sigmask(SIG_SETMASK, &blocked, &previous);
 #endif
     if (trace_path && trace_path[0]) {
-        s->trace_fd = open(trace_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        s->trace_fd = open(trace_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC
+#ifdef _WIN32
+                           | O_BINARY
+#endif
+                           , 0600);
         if (s->trace_fd < 0) {
             snprintf(error, error_size, "opening new HCI trace failed: %s", strerror(errno));
             goto fail;

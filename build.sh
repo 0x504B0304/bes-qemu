@@ -51,7 +51,12 @@ if grep -q '^werror = true$' "$qemu_src/build/config-meson.cross"; then
     "$bes_meson" configure "$qemu_src/build" -Dwerror=false
 fi
 bes_binary=qemu-system-arm
-case "$(uname -s)" in MINGW*|MSYS*) bes_binary=qemu-system-arm.exe ;; esac
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        bes_binary=qemu-system-arm.exe
+        python3 "$script_dir/tools/check_native_objects.py" "$qemu_src/build"
+        ;;
+esac
 ninja -C "$qemu_src/build" "$bes_binary"
 "$qemu_src/build/$bes_binary" -M help | grep bes1503
 printf 'Built: %s/build/%s\n' "$qemu_src" "$bes_binary"

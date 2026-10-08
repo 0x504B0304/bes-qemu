@@ -195,7 +195,7 @@
     },
     {
       "path": "build.sh",
-      "sha256": "61793fec11b78a99f461db0dc46ccec3b7139696d78a8595ea1f03ad4c96b4b6",
+      "sha256": "8aa135c652724dddd304148114fffc73427eb5789e6d9e07aac936d065fb5afb",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "7073bf7d9571dd6f68d46ebd946420d1deae87a9",
       "original_sha256": "125141b31674d9d9be81c039c110157c3bddc2784a563a29204f793e48769885",
@@ -1172,7 +1172,7 @@
     },
     {
       "path": "qemu/bridges/bluetooth/h4-serial/miband_bt_serial.c",
-      "sha256": "3d8fb6f92e02bd99cb81e0dcd5b30a8109b7e24b30374fcb544176dc4d9801d6",
+      "sha256": "b684c477563617f4db943695218a2c15e85b7d5fb9a81506c6da178fb146a43b",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "01b2d5316f76a6430a7e31f94b5dcdd44d46ae3c",
       "original_sha256": "a2eecd72f1c6f837b622b0c1386d10d695119190f96678bbf1b7ff223415f36e",
@@ -7219,6 +7219,24 @@
       "proprietary_release_approved": false,
       "publish_source_for_review": true,
       "distribution_obligation": "Preserve source and original notices; assess applicable licenses per file."
+    },
+    {
+      "path": "tools/check_native_objects.py",
+      "source_commit": null,
+      "original_git_blob": null,
+      "original_sha256": null,
+      "declared_license": [
+        "GPL-2.0-or-later"
+      ],
+      "notices": [
+        "# SPDX-License-Identifier: GPL-2.0-or-later"
+      ],
+      "technical_independence": "public-core-support",
+      "rights_status": "new-task-file-review-required",
+      "independent_proprietary_use_basis": false,
+      "proprietary_release_approved": false,
+      "publish_source_for_review": true,
+      "sha256": "8b9f28fc1cb161b2b9a357c0e032b73a0ae775d54d51bc1e115dbbe00dc69577"
     },
     {
       "path": "tools/check_project.py",
