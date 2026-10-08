@@ -18,6 +18,10 @@
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW 0
 #endif
+#ifndef O_NONBLOCK
+/* These descriptors are regular persistence files, never pipes/devices. */
+#define O_NONBLOCK 0
+#endif
 static inline int bes_file_lock(int fd)
 {
     OVERLAPPED ov = {0};
