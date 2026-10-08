@@ -1,0 +1,13 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "sd-read-ahead.patch",
+  "patch_sha256": "795327ff5b3a41765832c991e82b569e81f12a2ae51ede67c3bcbc98656323b0",
+  "files": [
+    {
+      "path": "hw/sd/sd.c",
+      "before_sha256": "7bd83440c17e13ad88c4ce999b9998b05ef0cf2a9f1f966a3039123e357f8089",
+      "after_sha256": "b2d167fa4dcf1169526b9b32190513187b4d145e40d0abc915f67fa91672a9f3"
+    }
+  ]
+}

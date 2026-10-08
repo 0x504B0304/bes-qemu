@@ -1,0 +1,95 @@
+--- a/hw/arm/armv7m.c
++++ b/hw/arm/armv7m.c
+@@ -243,6 +243,64 @@
+     .valid.min_access_size = 1,
+     .valid.max_access_size = 8,
+ };
++
++static MemTxResult dwt_read(void *opaque, hwaddr addr,
++                            uint64_t *data, unsigned size,
++                            MemTxAttrs attrs)
++{
++    ARMv7MState *s = opaque;
++
++    switch (addr) {
++    case 0x000:
++        *data = s->dwt_ctrl;
++        return MEMTX_OK;
++    case 0x004:
++        /* CYCCNT is used for timeout accounting by the firmware. A
++         * per-read increment preserves forward progress without making
++         * the hot path depend on host wall-clock locks. */
++        if (s->dwt_ctrl & 1) {
++            s->dwt_cyccnt++;
++        }
++        *data = s->dwt_cyccnt;
++        return MEMTX_OK;
++    default:
++        *data = 0;
++        return MEMTX_ERROR;
++    }
++}
++
++static MemTxResult dwt_write(void *opaque, hwaddr addr, uint64_t value,
++                             unsigned size, MemTxAttrs attrs)
++{
++    ARMv7MState *s = opaque;
++
++    switch (addr) {
++    case 0x000:
++        s->dwt_ctrl = value;
++        return MEMTX_OK;
++    case 0x004:
++        s->dwt_cyccnt = value;
++        return MEMTX_OK;
++    default:
++        return MEMTX_ERROR;
++    }
++}
++
++static const MemoryRegionOps dwt_ops = {
++    .read_with_attrs = dwt_read,
++    .write_with_attrs = dwt_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++};
++
++static void armv7m_dwt_reset(void *opaque)
++{
++    ARMv7MState *s = opaque;
++
++    s->dwt_ctrl = 0;
++    s->dwt_cyccnt = 0;
++}
+ 
+ static void armv7m_instance_init(Object *obj)
+ {
+@@ -429,6 +487,14 @@
+     memory_region_add_subregion_overlap(&s->container, 0xe0000000,
+                                         &s->defaultmem, -1);
+ 
++    /* DWT CTRL/CYCCNT are hot firmware polling registers. Keep them out of
++     * the unassigned PPB slow path while retaining RAZ/WI for the rest. */
++    memory_region_init_io(&s->dwtmem, OBJECT(s), &dwt_ops, s,
++                          "dwt", 0x008);
++    memory_region_add_subregion_overlap(&s->container, 0xe0001000,
++                                        &s->dwtmem, 0);
++    qemu_register_reset(armv7m_dwt_reset, s);
++
+     /* Wire the NVIC up to the CPU */
+     sbd = SYS_BUS_DEVICE(&s->nvic);
+     sysbus_connect_irq(sbd, 0,
+--- a/include/hw/arm/armv7m.h
++++ b/include/hw/arm/armv7m.h
+@@ -90,6 +90,10 @@
+     MemoryRegion sysreg_ns_mem;
+     /* MR providing default PPB behaviour */
+     MemoryRegion defaultmem;
++    /* Minimal architected DWT block used by firmware cycle accounting. */
++    MemoryRegion dwtmem;
++    uint32_t dwt_ctrl;
++    uint32_t dwt_cyccnt;
+ 
+     Clock *refclk;
+     Clock *cpuclk;

@@ -1,0 +1,104 @@
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -136,8 +136,9 @@
+ 
+     uint8_t spec_version;
+     uint64_t boot_part_size;
+     BlockBackend *blk;
++    bool media_inserted; /* Derived from the backend, not migrated. */
+     uint8_t boot_config;
+     uint32_t read_ahead_bytes;
+ 
+     /* Host-only, opt-in cache; never part of guest migration state. */
+@@ -869,9 +870,11 @@
+ }
+ 
+ static bool sd_get_inserted(SDState *sd)
+ {
+-    return sd->blk && blk_is_inserted(sd->blk);
++    /* SD byte transfers hold the BQL, as do backend media notifications.
++     * Querying the block graph here creates a coroutine for every byte. */
++    return sd->media_inserted;
+ }
+ 
+ static bool sd_get_readonly(SDState *sd)
+ {
+@@ -882,12 +885,13 @@
+ {
+     SDState *sd = opaque;
+     DeviceState *dev = DEVICE(sd);
+     SDBus *sdbus;
+-    bool inserted = sd_get_inserted(sd);
++    bool inserted = sd->blk && blk_is_inserted(sd->blk);
+     bool readonly = sd_get_readonly(sd);
+ 
+     sd->read_ahead_valid = 0;
++    sd->media_inserted = inserted;
+ 
+     if (inserted) {
+         trace_sdcard_inserted(readonly);
+         sd_reset(dev);
+@@ -959,8 +963,9 @@
+      * needed), then the OCR must be set as powered up. If the OCR state
+      * is included, this will be replaced by the state restore.
+      */
+     sd->read_ahead_valid = 0;
++    sd->media_inserted = sd->blk && blk_is_inserted(sd->blk);
+     sd_ocr_powerup(sd);
+ 
+     return 0;
+ }
+@@ -1042,9 +1047,9 @@
+ {
+     sd->readonly_cb = readonly;
+     sd->inserted_cb = insert;
+     qemu_set_irq(readonly, sd->blk ? !blk_is_writable(sd->blk) : 0);
+-    qemu_set_irq(insert, sd->blk ? blk_is_inserted(sd->blk) : 0);
++    qemu_set_irq(insert, sd_get_inserted(sd));
+ }
+ 
+ /* The key is the real backend offset, including the eMMC partition. */
+ static bool sd_read_ahead(SDState *sd, uint64_t addr, uint32_t len)
+@@ -2252,9 +2257,9 @@
+     int last_state;
+     sd_rsp_type_t rtype;
+     int rsplen;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk) || !sd->enable) {
++    if (!sd_get_inserted(sd) || !sd->enable) {
+         return 0;
+     }
+ 
+     if (sd->state == sd_inactive_state) {
+@@ -2403,9 +2408,9 @@
+ void sd_write_byte(SDState *sd, uint8_t value)
+ {
+     int i;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk) || !sd->enable)
++    if (!sd_get_inserted(sd) || !sd->enable)
+         return;
+ 
+     if (sd->state != sd_receivingdata_state) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -2535,9 +2540,9 @@
+     const uint8_t dummy_byte = 0x00;
+     uint8_t ret;
+     uint32_t io_len;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk) || !sd->enable)
++    if (!sd_get_inserted(sd) || !sd->enable)
+         return dummy_byte;
+ 
+     if (sd->state != sd_sendingdata_state) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+@@ -2847,8 +2852,9 @@
+         if (ret < 0) {
+             return;
+         }
+         blk_set_dev_ops(sd->blk, &sd_block_ops, sd);
++        sd->media_inserted = blk_is_inserted(sd->blk);
+     }
+ }
+ 
+ static void emmc_realize(DeviceState *dev, Error **errp)

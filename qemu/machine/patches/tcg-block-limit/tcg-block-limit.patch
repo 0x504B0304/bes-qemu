@@ -1,0 +1,130 @@
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -28,6 +28,7 @@
+ #include "exec/replay-core.h"
+ #include "sysemu/cpu-timers.h"
+ #include "tcg/startup.h"
++#include "tcg/tcg.h"
+ #include "tcg/oversized-guest.h"
+ #include "qapi/error.h"
+ #include "qemu/error-report.h"
+@@ -45,6 +46,8 @@
+ 
+     bool mttcg_enabled;
+     bool one_insn_per_tb;
++    bool initialized;
++    unsigned max_insns_per_tb;
+     int splitwx_enabled;
+     unsigned long tb_size;
+ };
+@@ -88,6 +91,7 @@
+     TCGState *s = TCG_STATE(obj);
+ 
+     s->mttcg_enabled = default_mttcg_enabled();
++    s->max_insns_per_tb = TCG_MAX_INSNS;
+ 
+     /* If debugging enabled, default "auto on", otherwise off. */
+ #if defined(CONFIG_DEBUG_TCG) && !defined(CONFIG_USER_ONLY)
+@@ -99,6 +103,7 @@
+ 
+ bool mttcg_enabled;
+ bool one_insn_per_tb;
++unsigned tcg_max_insns_per_tb = TCG_MAX_INSNS;
+ 
+ static int tcg_init_machine(MachineState *ms)
+ {
+@@ -109,6 +114,8 @@
+     unsigned max_cpus = ms->smp.max_cpus;
+ #endif
+ 
++    s->initialized = true;
++    tcg_max_insns_per_tb = s->max_insns_per_tb;
+     tcg_allowed = true;
+     mttcg_enabled = s->mttcg_enabled;
+ 
+@@ -205,6 +212,38 @@
+     s->one_insn_per_tb = value;
+     /* Set the global also: this changes the behaviour */
+     qatomic_set(&one_insn_per_tb, value);
++}
++
++/* Keep the limit immutable once CPUs can use cached translation blocks. */
++static void tcg_get_max_insns_per_tb(Object *obj, Visitor *v,
++                                    const char *name, void *opaque,
++                                    Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint32_t value = s->max_insns_per_tb;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void tcg_set_max_insns_per_tb(Object *obj, Visitor *v,
++                                    const char *name, void *opaque,
++                                    Error **errp)
++{
++    TCGState *s = TCG_STATE(obj);
++    uint32_t value;
++
++    if (!visit_type_uint32(v, name, &value, errp)) {
++        return;
++    }
++    if (s->initialized) {
++        error_setg(errp, "max-insns-per-tb cannot change after initialization");
++        return;
++    }
++    if (value < 1 || value > TCG_MAX_INSNS) {
++        error_setg(errp, "max-insns-per-tb must be in 1..%u", TCG_MAX_INSNS);
++        return;
++    }
++    s->max_insns_per_tb = value;
+ }
+ 
+ static int tcg_gdbstub_supported_sstep_flags(void)
+@@ -242,6 +281,11 @@
+     object_class_property_set_description(oc, "tb-size",
+         "TCG translation block cache size");
+ 
++    object_class_property_add(oc, "max-insns-per-tb", "int",
++        tcg_get_max_insns_per_tb, tcg_set_max_insns_per_tb, NULL, NULL);
++    object_class_property_set_description(oc, "max-insns-per-tb",
++        "Instruction limit for ordinary TCG blocks (1..512, default 512)");
++
+     object_class_property_add_bool(oc, "split-wx",
+         tcg_get_splitwx, tcg_set_splitwx);
+     object_class_property_set_description(oc, "split-wx",
+--- a/accel/tcg/internal-target.h
++++ b/accel/tcg/internal-target.h
+@@ -94,6 +94,7 @@
+ }
+ 
+ extern bool one_insn_per_tb;
++extern unsigned tcg_max_insns_per_tb;
+ 
+ /**
+  * tcg_req_mo:
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -309,7 +309,7 @@
+ 
+     max_insns = cflags & CF_COUNT_MASK;
+     if (max_insns == 0) {
+-        max_insns = TCG_MAX_INSNS;
++        max_insns = tcg_max_insns_per_tb;
+     }
+     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
+ 
+--- a/accel/tcg/monitor.c
++++ b/accel/tcg/monitor.c
+@@ -47,7 +47,11 @@
+                                                     "one-insn-per-tb",
+                                                     &error_fatal);
+ 
++    uint64_t limit = object_property_get_uint(OBJECT(accel),
++                                             "max-insns-per-tb", &error_fatal);
++
+     g_string_append_printf(buf, "Accelerator settings:\n");
++    g_string_append_printf(buf, "max-insns-per-tb: %"PRIu64"\n", limit);
+     g_string_append_printf(buf, "one-insn-per-tb: %s\n\n",
+                            one_insn_per_tb ? "on" : "off");
+ }

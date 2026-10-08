@@ -1,0 +1,25 @@
+import os, gdb, json
+from pathlib import Path
+_env = ${slot0}
+_old = {k: os.environ.get(k) for k in _env}
+_breakpoints = {b.number for b in (gdb.breakpoints() or [])}
+def _capture_stop(event):
+    unexpected = isinstance(event, gdb.SignalEvent)
+    if isinstance(event, gdb.BreakpointEvent):
+        unexpected = any(b.number in _breakpoints and "continue" not in (b.commands or "").splitlines() for b in event.breakpoints)
+    if unexpected:
+        Path(${slot1}).write_text(json.dumps({"registers":gdb.execute("info registers",to_string=True),"pc":str(gdb.parse_and_eval("$$pc"))}))
+gdb.events.stop.connect(_capture_stop)
+try:
+    os.environ.update(_env)
+    exec(compile(open(${slot2}).read(), ${slot3}, "exec"), {})
+finally:
+    gdb.events.stop.disconnect(_capture_stop)
+    for k, v in _old.items():
+        if v is None: os.environ.pop(k, None)
+        else: os.environ[k] = v
+    for b in (gdb.breakpoints() or []):
+        if b.number not in _breakpoints: b.delete()
+    if not _breakpoints.issubset({b.number for b in (gdb.breakpoints() or [])}):
+        raise RuntimeError("native operation removed bootstrap breakpoints")
+    gdb.write(${slot4} + "\n")

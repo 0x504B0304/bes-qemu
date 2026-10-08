@@ -1,0 +1,18 @@
+set pagination off
+set confirm off
+target remote 127.0.0.1:${slot0}
+python
+from pathlib import Path
+__file__ = ${slot1}
+exec(compile(Path(__file__).read_text(), __file__, "exec"), globals())
+Path(${slot2}).write_text("ready")
+end
+python
+if "native_resource_adapter" in globals(): native_resource_adapter.run_loop()
+else: gdb.execute("continue")
+end
+python
+if gdb.selected_thread() is not None:
+    record("stopped", id="debugger-stop")
+    while True: time.sleep(0.25)
+end

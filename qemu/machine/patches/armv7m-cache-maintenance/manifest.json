@@ -1,0 +1,23 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "armv7m-cache-maintenance.patch",
+  "patch_sha256": "5b427c59697e777fe2b6882e4396e9aeab997a7426598ce013f9f7786966b5bd",
+  "files": [
+    {
+      "path": "include/exec/memory.h",
+      "before_sha256": "763b918d09022d185cb5dd254ccc8c404a9488a0fa2195bc465d800e49325a3e",
+      "after_sha256": "2205950208da1cbdccc5c4fce7697ea80a7826032bf4f64799974fabd046c77c"
+    },
+    {
+      "path": "accel/tcg/cputlb.c",
+      "before_sha256": "6ce929aabb5f418fddfa12b8c45a4004d92197eb919aaa33377286c95f69a2b7",
+      "after_sha256": "a13d6e96219498b5676a9f87ea954eceaf6a32dc9c80591d17ff177046c2e91b"
+    },
+    {
+      "path": "hw/intc/armv7m_nvic.c",
+      "before_sha256": "0fec8a0ec6e9a3efe4f02217889e5429c2239e7a23f9af8515f82e70265016cf",
+      "after_sha256": "184bf224b075cbf350a7cc2b918ffdf713a5bb3097effd7a42e72ebb973f514c"
+    }
+  ]
+}

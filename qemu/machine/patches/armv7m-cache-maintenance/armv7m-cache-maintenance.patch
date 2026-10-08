@@ -1,0 +1,83 @@
+--- a/include/exec/memory.h
++++ b/include/exec/memory.h
+@@ -280,8 +280,17 @@
+                                     hwaddr addr,
+                                     uint64_t data,
+                                     unsigned size,
+                                     MemTxAttrs attrs);
++
++    /* Optional TCG fast path for writes whose architected effect is MEMTX_OK
++     * without changing any device or CPU state. Called without the BQL, under
++     * RCU: inspect only immutable configuration and the transaction arguments.
++     * Return false for faults, unsupported sizes and all stateful operations.
++     * The normal dispatch path remains responsible for those transactions.
++     */
++    bool (*write_is_nop)(void *opaque, hwaddr addr, uint64_t value,
++                         unsigned size, MemTxAttrs attrs);
+ 
+     enum device_endian endianness;
+     /* Guest-visible constraints: */
+     struct {
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -2574,8 +2574,16 @@
+     attrs = full->attrs;
+     section = io_prepare(&mr_offset, cpu, full, attrs, addr, ra);
+     mr = section->mr;
+ 
++    if (mr->ops->write_is_nop &&
++        mr->ops->write_is_nop(mr->opaque, mr_offset,
++                              size < 8 ? val_le & MAKE_64BIT_MASK(0, size * 8)
++                                       : val_le,
++                              size, attrs)) {
++        return size == 8 ? 0 : val_le >> (size * 8);
++    }
++
+     qemu_mutex_lock_iothread();
+     ret = int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+                           ra, mr, mr_offset);
+     qemu_mutex_unlock_iothread();
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -2462,11 +2462,41 @@
+     }
+     return MEMTX_OK;
+ }
+ 
++/* QEMU has coherent guest RAM and does not implement a separate cache.
++ * These privileged word writes have no stateful effect, so TCG may complete
++ * them without serializing unrelated AMP cores through the global I/O lock.
++ * Unprivileged accesses still take the original BusFault path.
++ */
++static bool nvic_cache_write_is_nop(void *opaque, hwaddr addr, uint64_t value,
++                                   unsigned size, MemTxAttrs attrs)
++{
++    if (attrs.user || size != 4) {
++        return false;
++    }
++    switch (addr) {
++    case 0xf50: /* ICIALLU */
++    case 0xf58: /* ICIMVAU */
++    case 0xf5c: /* DCIMVAC */
++    case 0xf60: /* DCISW */
++    case 0xf64: /* DCCMVAU */
++    case 0xf68: /* DCCMVAC */
++    case 0xf6c: /* DCCSW */
++    case 0xf70: /* DCCIMVAC */
++    case 0xf74: /* DCCISW */
++    case 0xf78: /* BPIALL */
++        trace_nvic_sysreg_write(addr, value, size);
++        return true;
++    default:
++        return false;
++    }
++}
++
+ static const MemoryRegionOps nvic_sysreg_ops = {
+     .read_with_attrs = nvic_sysreg_read,
+     .write_with_attrs = nvic_sysreg_write,
++    .write_is_nop = nvic_cache_write_is_nop,
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+ static int nvic_post_load(void *opaque, int version_id)

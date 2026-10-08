@@ -1,0 +1,18 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "armv7m-dwt.patch",
+  "patch_sha256": "a9e4d88e37a407fafe4834388444d05b15f8e0b662f30b8ea1905e0d62abf63b",
+  "files": [
+    {
+      "path": "hw/arm/armv7m.c",
+      "before_sha256": "236d8ef94535e673c3cc4a30faa45cd0cdb3b829e000f6c8ad260a64a20a9772",
+      "after_sha256": "a7067b6febf6bd19470b0678f28e24e3cab20210e817c6add1382e39aaebb192"
+    },
+    {
+      "path": "include/hw/arm/armv7m.h",
+      "before_sha256": "a72f919f08667794cf7cebf50b9059dbbb6b1c20106242223a54176b44800557",
+      "after_sha256": "249bd8cdc69d64fadeb92fc17019e60c7c6a3265387726bd51983e6061505c70"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "upstream_version": "9.2.0",
+  "patch": "emmc.patch",
+  "patch_sha256": "3d7498bc51605b744165c5822883ab8b169366359a64f4b7566e86a344a5e99c",
+  "files": [
+    {
+      "path": "hw/sd/sd.c",
+      "before_sha256": "746920be8a690d7c9ec65d6835db3f310521fb592c3fb5f3a5cc1996c040bc80",
+      "after_sha256": "7bd83440c17e13ad88c4ce999b9998b05ef0cf2a9f1f966a3039123e357f8089"
+    },
+    {
+      "path": "hw/sd/core.c",
+      "before_sha256": "5d8cdb54bd657ad9644a48d5076a19b92cdc1e0d06ed30533d92afc2a46c9958",
+      "after_sha256": "0561cf5b51c79e2f38ff088bfefc7fb20693011da0b21aebc3a8f1c259e0ec5d"
+    },
+    {
+      "path": "hw/sd/sdmmc-internal.h",
+      "before_sha256": "f56e096b00e93e5daee49ae29cfef84a64f395420cb11bcd5492477b5425c73e",
+      "after_sha256": "b0adeb3adf337a89d908d3db873310451b9fbe0e88cf894703e45cdcec3aa376"
+    },
+    {
+      "path": "include/hw/sd/sd.h",
+      "before_sha256": "6e1ba7b55baedc44e43dbb3daceb19ef9b014db7006add9e80d0459d182d22a8",
+      "after_sha256": "627b1e663d85c27cd8353da707699d8c82f7c360d8229fd60eb8edf15c0a5a8d"
+    },
+    {
+      "path": "hw/sd/trace-events",
+      "before_sha256": "624f878bd880c3ea18d3eb954189b31abf80402ec08eb0d1fabf689de4fd87e7",
+      "after_sha256": "8ee97cadd5a88659465aefeb682f5a73c03679f9da7b2de1eb347d7fd6d6f22d"
+    },
+    {
+      "path": "hw/sd/meson.build",
+      "before_sha256": "9d9aa1962d9424970099562721d92856b5d2e41750b40a9849a83548ccc0f258",
+      "after_sha256": "51a676b6e0183f1e5f7a64e1f98fef7f84a6bd8fdb885edb39d233874f6b8493"
+    },
+    {
+      "path": "hw/sd/sdhci.c",
+      "before_sha256": "f7a23bc3ec73d8c485dbe4c3005dfac02a3ed68de7b9cd5a53b5f180ef5bb4f9",
+      "after_sha256": "6af2808a6bbd52f4b84c31a881276f98d6c86dcb8554ab4dd67584514156797e"
+    },
+    {
+      "path": "include/hw/sd/sdhci.h",
+      "before_sha256": "9a04b7c429462fc1ca123c142c3a2c01673c3305749faa87aacc0a360f49771a",
+      "after_sha256": "e3919c0bbba3e562c5b310ccc0067458bf4d879ff87ac9ad26689263acfbbb8a"
+    }
+  ]
+}

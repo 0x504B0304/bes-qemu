@@ -1,0 +1,13 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "sd-media-state.patch",
+  "patch_sha256": "4ae32b0e01db9165166d7357b8868e3fc4501801107129d8a2abf93119125ea9",
+  "files": [
+    {
+      "path": "hw/sd/sd.c",
+      "before_sha256": "b2d167fa4dcf1169526b9b32190513187b4d145e40d0abc915f67fa91672a9f3",
+      "after_sha256": "5f8d0463180eea18843d8c4f5f38f0085c21a08e14bf4845b168d027c80f8116"
+    }
+  ]
+}

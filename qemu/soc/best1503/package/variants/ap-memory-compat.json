@@ -1,0 +1,19 @@
+{
+  "schema": "bes.package.v1",
+  "id": "best1503-ap-memory-compat",
+  "soc": "best1503",
+  "evidence": "Emulated compatibility values; physical die identification remains unverified.",
+  "nor": {
+    "size": 16777216,
+    "sector_size": 4096,
+    "jedec_id": [
+      200,
+      96,
+      23
+    ]
+  },
+  "psram": {
+    "size": 33554432,
+    "mr1": 13
+  }
+}

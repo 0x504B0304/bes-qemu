@@ -1,0 +1,20 @@
+{
+  "schema": "bes.package.best1700.v1",
+  "id": "bes2800bp-compat",
+  "soc": "best1700",
+  "evidence": "The SYS NOR identity is an emulator compatibility choice with two 8 MiB dies in a 16 MiB package. The independently selected BTH NOR uses one 16 MiB die. These are compatibility selections, not hardware identifications of the physical product. All unique IDs are deterministic synthetic values.",
+  "nor": {
+    "size": 16777216,
+    "die_count": 2,
+    "jedec_id": [200, 96, 23],
+    "uid0": 1657324662872342529,
+    "uid1": 1657324662872342530
+  },
+  "bth_nor": {
+    "size": 16777216,
+    "die_count": 1,
+    "jedec_id": [200, 96, 24],
+    "uid0": 1657324662872342785,
+    "uid1": 1657324662872342786
+  }
+}

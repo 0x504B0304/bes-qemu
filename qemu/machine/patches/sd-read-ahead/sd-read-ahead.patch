@@ -1,0 +1,279 @@
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -129,24 +129,30 @@
+         struct {
+             uint8_t ext_csd_rw[192]; /* Modes segment */
+             uint8_t ext_csd_ro[320]; /* Properties segment */
+         };
+     };
+ 
+     /* Static properties */
+ 
+     uint8_t spec_version;
+     uint64_t boot_part_size;
+     BlockBackend *blk;
+     uint8_t boot_config;
++    uint32_t read_ahead_bytes;
++
++    /* Host-only, opt-in cache; never part of guest migration state. */
++    uint8_t read_ahead_data[65536];
++    uint64_t read_ahead_base;
++    uint32_t read_ahead_valid;
+ 
+     const SDProto *proto;
+ 
+     /* Runtime changeables */
+ 
+     uint32_t mode;    /* current card mode, one of SDCardModes */
+     int32_t state;    /* current card state, one of SDCardStates */
+     uint32_t vhs;
+     bool wp_switch;
+     unsigned long *wp_group_bmap;
+     int32_t wp_group_bits;
+     uint64_t size;
+@@ -812,24 +818,25 @@
+ static inline uint64_t sd_addr_to_wpnum(uint64_t addr)
+ {
+     return addr >> (HWBLOCK_SHIFT + SECTOR_SHIFT + WPGROUP_SHIFT);
+ }
+ 
+ static void sd_reset(DeviceState *dev)
+ {
+     SDState *sd = SDMMC_COMMON(dev);
+     SDCardClass *sc = SDMMC_COMMON_GET_CLASS(sd);
+     uint64_t size;
+     uint64_t sect;
+ 
++    sd->read_ahead_valid = 0;
+     trace_sdcard_reset();
+     if (sd->blk) {
+         blk_get_geometry(sd->blk, &sect);
+     } else {
+         sect = 0;
+     }
+     size = sect << HWBLOCK_SHIFT;
+     if (sd_is_emmc(sd)) {
+         size -= sd->boot_part_size * 2;
+     }
+ 
+     sect = sd_addr_to_wpnum(size) + 1;
+@@ -870,24 +877,26 @@
+ {
+     return sd->wp_switch;
+ }
+ 
+ static void sd_cardchange(void *opaque, bool load, Error **errp)
+ {
+     SDState *sd = opaque;
+     DeviceState *dev = DEVICE(sd);
+     SDBus *sdbus;
+     bool inserted = sd_get_inserted(sd);
+     bool readonly = sd_get_readonly(sd);
+ 
++    sd->read_ahead_valid = 0;
++
+     if (inserted) {
+         trace_sdcard_inserted(readonly);
+         sd_reset(dev);
+     } else {
+         trace_sdcard_ejected();
+     }
+ 
+     if (sd->me_no_qdev_me_kill_mammoth_with_rocks) {
+         qemu_set_irq(sd->inserted_cb, inserted);
+         if (inserted) {
+             qemu_set_irq(sd->readonly_cb, readonly);
+         }
+@@ -941,24 +950,25 @@
+         VMSTATE_END_OF_LIST()
+     },
+ };
+ 
+ static int sd_vmstate_pre_load(void *opaque)
+ {
+     SDState *sd = opaque;
+ 
+     /* If the OCR state is not included (prior versions, or not
+      * needed), then the OCR must be set as powered up. If the OCR state
+      * is included, this will be replaced by the state restore.
+      */
++    sd->read_ahead_valid = 0;
+     sd_ocr_powerup(sd);
+ 
+     return 0;
+ }
+ 
+ static const VMStateDescription sd_vmstate = {
+     .name = "sd-card",
+     .version_id = 2,
+     .minimum_version_id = 2,
+     .pre_load = sd_vmstate_pre_load,
+     .fields = (const VMStateField[]) {
+         VMSTATE_UINT32(mode, SDState),
+@@ -1027,37 +1037,84 @@
+     sd->me_no_qdev_me_kill_mammoth_with_rocks = true;
+     return sd;
+ }
+ 
+ void sd_set_cb(SDState *sd, qemu_irq readonly, qemu_irq insert)
+ {
+     sd->readonly_cb = readonly;
+     sd->inserted_cb = insert;
+     qemu_set_irq(readonly, sd->blk ? !blk_is_writable(sd->blk) : 0);
+     qemu_set_irq(insert, sd->blk ? blk_is_inserted(sd->blk) : 0);
+ }
+ 
++/* The key is the real backend offset, including the eMMC partition. */
++static bool sd_read_ahead(SDState *sd, uint64_t addr, uint32_t len)
++{
++    uint64_t base;
++    uint32_t count;
++    int64_t length;
++
++    if (!sd->read_ahead_bytes || !sd->blk ||
++        len > sd->read_ahead_bytes) {
++        return false;
++    }
++    if (addr >= sd->read_ahead_base &&
++        addr - sd->read_ahead_base <= sd->read_ahead_valid &&
++        len <= sd->read_ahead_valid - (addr - sd->read_ahead_base)) {
++        memcpy(sd->data, sd->read_ahead_data +
++               (addr - sd->read_ahead_base), len);
++        return true;
++    }
++
++    sd->read_ahead_valid = 0;
++    base = addr & ~((uint64_t)sd->read_ahead_bytes - 1);
++    length = blk_getlength(sd->blk);
++    if (length < 0 || base >= length) {
++        return false;
++    }
++    count = MIN((uint64_t)sd->read_ahead_bytes, length - base);
++    if (addr - base > count || len > count - (addr - base) ||
++        blk_pread(sd->blk, base, count, sd->read_ahead_data, 0) < 0) {
++        /* Speculative I/O must not change the original request's error. */
++        return false;
++    }
++    sd->read_ahead_base = base;
++    sd->read_ahead_valid = count;
++    memcpy(sd->data, sd->read_ahead_data + (addr - base), len);
++    return true;
++}
++
+ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
+ {
+     trace_sdcard_read_block(addr, len);
+     addr += sd_bootpart_offset(sd);
++    if (sd_read_ahead(sd, addr, len)) {
++        return;
++    }
+     if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
+         fprintf(stderr, "sd_blk_read: read error on host side\n");
+     }
+ }
+ 
+ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
+ {
+     trace_sdcard_write_block(addr, len);
+     addr += sd_bootpart_offset(sd);
++    if (sd->read_ahead_valid &&
++        ((addr <= sd->read_ahead_base && len > sd->read_ahead_base - addr) ||
++         (addr > sd->read_ahead_base &&
++          addr - sd->read_ahead_base < sd->read_ahead_valid))) {
++        /* Invalidate before I/O, including failed/partial writes. */
++        sd->read_ahead_valid = 0;
++    }
+     if (!sd->blk || blk_pwrite(sd->blk, addr, len, sd->data, 0) < 0) {
+         fprintf(stderr, "sd_blk_write: write error on host side\n");
+     }
+ }
+ 
+ static void sd_erase(SDState *sd)
+ {
+     uint64_t erase_start = sd->erase_start;
+     uint64_t erase_end = sd->erase_end;
+     bool sdsc = true;
+     uint64_t wpnum;
+     uint64_t erase_addr;
+@@ -2726,24 +2783,32 @@
+ static void sd_instance_finalize(Object *obj)
+ {
+     SDState *sd = SDMMC_COMMON(obj);
+ 
+     timer_free(sd->ocr_power_timer);
+ }
+ 
+ static void sd_realize(DeviceState *dev, Error **errp)
+ {
+     SDState *sd = SDMMC_COMMON(dev);
+     int ret;
+ 
++    if (sd->read_ahead_bytes &&
++        (sd->read_ahead_bytes < 512 || sd->read_ahead_bytes > 65536 ||
++         !is_power_of_2(sd->read_ahead_bytes))) {
++        error_setg(errp, "read-ahead-bytes must be 0 or a power of two "
++                   "between 512 and 65536");
++        return;
++    }
++
+     switch (sd->spec_version) {
+     case SD_PHY_SPECv1_10_VERS
+      ... SD_PHY_SPECv3_01_VERS:
+         break;
+     default:
+         error_setg(errp, "Invalid SD card Spec version: %u", sd->spec_version);
+         return;
+     }
+ 
+     if (sd->blk) {
+         int64_t blk_size;
+ 
+@@ -2765,44 +2830,48 @@
+             error_append_hint(errp,
+                               "SD card size has to be a power of 2, e.g. %s.\n"
+                               "You can resize disk images with"
+                               " 'qemu-img resize <imagefile> <new-size>'\n"
+                               "(note that this will lose data if you make the"
+                               " image smaller than it currently is).\n",
+                               blk_size_str);
+             g_free(blk_size_str);
+ 
+             return;
+         }
+ 
++        /* Cached readers cannot share their backend with another writer. */
+         ret = blk_set_perm(sd->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
++                           sd->read_ahead_bytes ?
++                           BLK_PERM_ALL & ~(BLK_PERM_WRITE | BLK_PERM_RESIZE) :
+                            BLK_PERM_ALL, errp);
+         if (ret < 0) {
+             return;
+         }
+         blk_set_dev_ops(sd->blk, &sd_block_ops, sd);
+     }
+ }
+ 
+ static void emmc_realize(DeviceState *dev, Error **errp)
+ {
+     SDState *sd = SDMMC_COMMON(dev);
+ 
+     sd->spec_version = SD_PHY_SPECv3_01_VERS; /* Actually v4.3 */
+ 
+     sd_realize(dev, errp);
+ }
+ 
+ static Property sdmmc_common_properties[] = {
+     DEFINE_PROP_DRIVE("drive", SDState, blk),
++    DEFINE_PROP_UINT32("read-ahead-bytes", SDState, read_ahead_bytes, 0),
+     DEFINE_PROP_END_OF_LIST()
+ };
+ 
+ static Property sd_properties[] = {
+     DEFINE_PROP_UINT8("spec_version", SDState,
+                       spec_version, SD_PHY_SPECv3_01_VERS),
+     DEFINE_PROP_END_OF_LIST()
+ };
+ 
+ static Property emmc_properties[] = {
+     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
+     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),

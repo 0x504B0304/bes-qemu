@@ -1,0 +1,10 @@
+License status and preservation notice
+
+External contributions remain unconfirmed. Moving files, process separation, Git author labels and JavaScript imports do not establish relicensing rights. Earlier blanket ownership/license assertions are withdrawn. Preserve original notices and publish uncertain source for review; commercial clearance is pending.
+
+Existing per-file and upstream licenses control. QEMU combined/derived code and
+its required build materials remain subject to QEMU GPL obligations. This notice
+does not grant new MIT, GPL or proprietary rights in unconfirmed contributions.
+LICENSES/ contains reference license texts, not blanket relicensing grants.
+Golden Layout retains its supplied MIT notice. Firmware/assets need separate
+distribution permission. See docs/LICENSING_BOUNDARIES.md.

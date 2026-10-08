@@ -1,0 +1,2 @@
+# Backport payload hashes depend on exact bytes; blank context lines are valid.
+qemu/machine/patches/**/*.patch -text whitespace=-blank-at-eol

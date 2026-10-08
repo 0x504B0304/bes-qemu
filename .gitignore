@@ -1,0 +1,40 @@
+# Build trees, compiled binaries and caches
+/build/
+/qemu-build*/
+/qemu-system-*
+/pyvenv/
+/.venv/
+*.o
+*.a
+__pycache__/
+*.pyc
+
+# External firmware and reverse-engineering databases
+*.bin
+*.elf
+*.yaffs
+*.i64
+*.id0
+*.id1
+*.nam
+*.til
+
+# Runtime data and private state
+*.log
+*.ppm
+*.pcap
+*.journal
+*.journal.lock
+/.private/
+/.env*
+!/.env.example
+/qemu/config/emulator-serial.prop
+/runs/
+/captures/
+/dumps/
+/historical/
+/verification/
+/process-records/
+/E:*
+# Local recovery copies from WebUI migrations are never part of the source tree.
+/qemu/bridges/display/web.backup-*/

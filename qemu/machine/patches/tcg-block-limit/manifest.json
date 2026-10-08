@@ -1,0 +1,28 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "tcg-block-limit.patch",
+  "patch_sha256": "3640e91a25e392618368f71bad8db5b67379195282d744a536411651e7acbd3b",
+  "files": [
+    {
+      "path": "accel/tcg/tcg-all.c",
+      "before_sha256": "44c60b63dbea5392e7360218ea847a9005d3d14fc3a965fc16cbf9264a6a86d4",
+      "after_sha256": "1227d5d0fe79f564e8545d75a201f6e18eceefd36ae6e19d043215c1fe09f121"
+    },
+    {
+      "path": "accel/tcg/internal-target.h",
+      "before_sha256": "cf459f823f722f57acc78d32fbf3efc5d73bd6da7536c78faa3dc8c6c209d1eb",
+      "after_sha256": "c62e166070fbd65ada6d82d7a2536df18b45dcbfe16ba8e35c9f1bffc5e280a7"
+    },
+    {
+      "path": "accel/tcg/translate-all.c",
+      "before_sha256": "1a60e630b910c866d2f621c193ddbfd0b6e5fed09674ea93867d8739a3bdf298",
+      "after_sha256": "521a21012e6771055c60b5084402fef922aae68465da0841d051ac7ed92e8d4b"
+    },
+    {
+      "path": "accel/tcg/monitor.c",
+      "before_sha256": "cc0cb4defdec30710756e2f62f52b1dd995cc7aa01760ce91e230f41ff157543",
+      "after_sha256": "fd9834570a075f2bc3101fd0cc5299dc76ccfb7e4acc2f8d654b26df1c7c1085"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "upstream_commits": [
+    "94c6e9cf04409e38563080348d6136879f91ffee",
+    "854cd16e318eed12de2995014b28d9f374c64bf7"
+  ],
+  "patch": "tcg-iommu.patch",
+  "patch_sha256": "5fb2628b6b5128fe56f8170841f580ad266bdb4f0561b31677dbde2a74e43e40",
+  "files": [
+    {
+      "path": "accel/tcg/cputlb.c",
+      "before_sha256": "80e39541059a8fefef21e1e242e7abbf157f44aff8dd826ded704a76f54d3fe9",
+      "after_sha256": "6ce929aabb5f418fddfa12b8c45a4004d92197eb919aaa33377286c95f69a2b7"
+    },
+    {
+      "path": "include/hw/core/cpu.h",
+      "before_sha256": "cb1e4acd98d919c4fb4f9b657f6f2c3b10e7cec1930b2f9a2a5c55262fc95e24",
+      "after_sha256": "7d49d3b3b77a844c0b6e0a7922ee48e7a41efe85817613567f2736ad320e23cc"
+    },
+    {
+      "path": "include/exec/exec-all.h",
+      "before_sha256": "772fb50b9abc5c7369bbe79b1c439e29c16d0ffa9e1203f737ba133f046b4242",
+      "after_sha256": "684b8c1a1165d64a3beb8729dd1cfe37435ce56b8130a2e28253ef20f1eda32a"
+    },
+    {
+      "path": "system/physmem.c",
+      "before_sha256": "0679d3672dfb12ec25d5b22968fbc9bcac483651da1e0e435ccb5d917658bd0f",
+      "after_sha256": "db6391a99ae4f22b37a4092aefa9ba0c335210feeb660e0360acb27d9420aac4"
+    }
+  ]
+}
