@@ -195,7 +195,7 @@
     },
     {
       "path": "build.sh",
-      "sha256": "ce857063bb4c623d76d5e09a5e6c8dd4f5b28b2113eb1da860bd206135bba49d",
+      "sha256": "f5cb17aaced29f59abcb305656b78dab845b59c1096f7210df22c3339152662b",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "7073bf7d9571dd6f68d46ebd946420d1deae87a9",
       "original_sha256": "125141b31674d9d9be81c039c110157c3bddc2784a563a29204f793e48769885",
@@ -214,7 +214,7 @@
     },
     {
       "path": "debugger/native_crown.py",
-      "sha256": "4d6f687d190917100052caab440fc5ecb019e84b85a35a8e6f84732dcc0c07f6",
+      "sha256": "bfd2fe4c8b5900a186bfb1469a091365175c0eae69dd6d6df4a3bc6a91ae2551",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -231,7 +231,7 @@
     },
     {
       "path": "debugger/native_quickapp.py",
-      "sha256": "eae0ecf4757491b55bc4871253eb30d82255419fc04bc5cb550d378885e4f072",
+      "sha256": "8580f0b9261338c049b52db6f3ec8efe338579a4034280777166770f163d51f8",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -248,7 +248,7 @@
     },
     {
       "path": "debugger/native_resource_query.py",
-      "sha256": "b0e393c7c6852480e1043fb3cf3b1791ec96f7edaed68c58c4df90a44a851e70",
+      "sha256": "e662c5c91bed4b325ba90540b5a8cd9a5a6081ab13928c00f5e47d7305b80c74",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -265,7 +265,7 @@
     },
     {
       "path": "debugger/native_watchface.py",
-      "sha256": "4abcd426f086237ca51174bdc86f30c38ef39f248eebc3bf86d3b93a66673da6",
+      "sha256": "be8c2f990ffe59fc14703a05e7c7e06718a3b8751a059f4c8e0315cbffa1f21e",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -282,7 +282,7 @@
     },
     {
       "path": "debugger/nuttx_uart_inject.py",
-      "sha256": "e50217a4264eeec8ddc21b1aa17ef18a9a0e08612a5f24f803bd2c74f6cc09e7",
+      "sha256": "82b2cac6f502fb396b1d21d70badcd2e477ee27a8f087307b36c7042b703e5ac",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -333,7 +333,7 @@
     },
     {
       "path": "docs/CONFIGURATION_ABI.md",
-      "sha256": "6ffcf43314296665794d736a8b59ae8196f2da848eb2f5d5882d6c54478dc687",
+      "sha256": "dcef989fabe9d2bcc4a60f4418cb0495340efdc76bc0bb909a27cdb5b467a49b",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -350,7 +350,7 @@
     },
     {
       "path": "docs/LICENSING_BOUNDARIES.md",
-      "sha256": "5c03a411ea8d2cba89f1fd339c0da89c7650769fa50dee43dcab5ee67bcd9ef6",
+      "sha256": "e0bda05e5a6e5cbc128d7b7cf1e54458e836628f0822bf41570cafb1f0bc8958",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -1172,7 +1172,7 @@
     },
     {
       "path": "qemu/bridges/bluetooth/h4-serial/miband_bt_serial.c",
-      "sha256": "a2eecd72f1c6f837b622b0c1386d10d695119190f96678bbf1b7ff223415f36e",
+      "sha256": "3d8fb6f92e02bd99cb81e0dcd5b30a8109b7e24b30374fcb544176dc4d9801d6",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "01b2d5316f76a6430a7e31f94b5dcdd44d46ae3c",
       "original_sha256": "a2eecd72f1c6f837b622b0c1386d10d695119190f96678bbf1b7ff223415f36e",
@@ -1242,7 +1242,7 @@
     },
     {
       "path": "qemu/bridges/bluetooth/miband_hci_bridge.c",
-      "sha256": "6e30183c67bd0a76213c3d69b4c519c7c56fbc74ade809e3ddc90e70bedf5c62",
+      "sha256": "df3125a737b47e4221c71a72e18900f12792ff22a99bd6c37efda2bc19b3c7e5",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "ac98470ab1baf6c403844be5a7c530d71b8a768a",
       "original_sha256": "6e30183c67bd0a76213c3d69b4c519c7c56fbc74ade809e3ddc90e70bedf5c62",
@@ -1898,7 +1898,7 @@
     },
     {
       "path": "qemu/machine/bes_runtime_config.c",
-      "sha256": "1a06f95eba6e1ada903be94b35c4cb209a8a41744ece713e932ace9c07553302",
+      "sha256": "81e6d20844a1895e961d8e329443bdffb899d15a162d4d8a225974a738fad46f",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,
@@ -1955,7 +1955,7 @@
     },
     {
       "path": "qemu/machine/best1700.c",
-      "sha256": "4a3ce250c8a9e50a9985f1023ef3b419692f7fc57e7fe4bd3beadbad465db054",
+      "sha256": "6bcd695362c23551f68c7d3f39b4bbcf0287a695d5c83534a3d5d82e7b0efdc3",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "304046f8aee7c75c638dd588eb1ae937578645f6",
       "original_sha256": "4df18ec276e81eda597a670a33f6eb48fccef59f9a1ac77f7e6478ecec207156",
@@ -2359,7 +2359,7 @@
     },
     {
       "path": "qemu/machine/sources.json",
-      "sha256": "26a68720a48d4f174d387416e87fb0543e3522f21515c6b014ea29dcf45ee912",
+      "sha256": "840556aa98a674689aecdee98874635be32c089bf337508366f5df593bbcbd03",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "8a7d3ebd6a7a916d6c0925158d47773652f9b3b0",
       "original_sha256": "241f883ee91b169a7880a9cd00fa380a65c5f2ad211a95cbc981576261b4bdcd",
@@ -2375,8 +2375,26 @@
       "distribution_obligation": "Preserve upstream notices and complete corresponding source for the QEMU combination. GPL obligations do not establish missing contributor permission."
     },
     {
+      "path": "qemu/persistence/bes_host_file.h",
+      "source_commit": null,
+      "original_git_blob": null,
+      "original_sha256": null,
+      "declared_license": [
+        "GPL-2.0-or-later "
+      ],
+      "notices": [
+        "/* SPDX-License-Identifier: GPL-2.0-or-later */"
+      ],
+      "technical_independence": "public-core-support",
+      "rights_status": "new-task-file-review-required",
+      "independent_proprietary_use_basis": false,
+      "proprietary_release_approved": false,
+      "publish_source_for_review": true,
+      "sha256": "a6314a668223f53e637db382a2c7dd53da7964aacf14cf947c0d8c3f968cbe55"
+    },
+    {
       "path": "qemu/persistence/miband_store.c",
-      "sha256": "52edcb9813c302b1119f0ce33df58b9e6dc775a3324b922bd574d8a534e17cd9",
+      "sha256": "505a2f378ed69b367f7115f47c8f89adc4f10236a230b04e2d5e6f61931305da",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "10cd4309f1ed094f59c39c76946dea87ed6915bf",
       "original_sha256": "52edcb9813c302b1119f0ce33df58b9e6dc775a3324b922bd574d8a534e17cd9",
@@ -2495,7 +2513,7 @@
     },
     {
       "path": "qemu/soc/best1502p/controllers/ispi/best1502p_ispi.c",
-      "sha256": "f8faac5dba7d423aee1a89685ee89d743f271dbf154b6dc8dd49868db2224600",
+      "sha256": "fe0aea8b1f2d6a5f84f9309ded290f35428cd6717fb6cb4775473ba6b17459f5",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "9661264e54d210304807d0f782bd1a6d4041eec6",
       "original_sha256": "ac459989d8ad1f0950bf67f3468bd92f3feeb8f51a665a78e82789bbc4545a4d",
@@ -6979,7 +6997,7 @@
     },
     {
       "path": "tests/test_runtime_config.py",
-      "sha256": "be4b198eead05386f9ead0479e1100672cfa0607f1a2aef5d714d8834824004e",
+      "sha256": "2c8e3c18216cc933461cf054b58406ab02b5f76e260f0b403e4391723942ccf6",
       "source_commit": null,
       "original_git_blob": null,
       "original_sha256": null,

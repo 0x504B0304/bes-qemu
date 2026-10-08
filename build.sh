@@ -36,6 +36,7 @@ if [[ ! -f "$qemu_src/build/build.ninja" ]]; then
             --disable-guest-agent --disable-slirp \
             --disable-sdl --disable-gtk --disable-curses \
             --disable-opengl --disable-virglrenderer --disable-spice \
+            --disable-gnutls \
             --disable-capstone --disable-libnfs --disable-libiscsi \
             --disable-rbd --disable-xen --disable-kvm \
             --disable-tcg-interpreter --disable-werror
