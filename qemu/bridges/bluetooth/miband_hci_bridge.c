@@ -10,6 +10,10 @@
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <termios.h>
+#ifdef __APPLE__
+#include <IOKit/serial/ioss.h>
+#include <sys/ioctl.h>
+#endif
 #else
 #include <windows.h>
 #include <io.h>
@@ -234,14 +238,20 @@ static speed_t bridge_serial_speed(unsigned baud)
     switch (baud) {
     case 115200: return B115200;
     case 230400: return B230400;
+#ifdef B460800
     case 460800: return B460800;
+#endif
 #ifdef B921600
     case 921600: return B921600;
 #endif
 #ifdef B1500000
     case 1500000: return B1500000;
 #endif
+#ifdef __APPLE__
+    default: return baud ? B115200 : 0;
+#else
     default: return 0;
+#endif
     }
 }
 
@@ -304,6 +314,10 @@ bool miband_hci_bridge_open_serial(MiBandHciBridge *bridge, const char *path,
         close(fd);
         return false;
     }
+#endif
+#ifdef __APPLE__
+    speed_t requested_baud = baud;
+    if (ioctl(fd, IOSSIOSPEED, &requested_baud) < 0) { close(fd); return false; }
 #endif
     bridge->host_fd = fd;
     bridge->host_active = true;

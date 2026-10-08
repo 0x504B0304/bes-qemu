@@ -46,7 +46,8 @@ fi
 # --disable-werror; Meson reconfigure reads that native-file default again.
 if grep -q '^werror = true$' "$qemu_src/build/config-meson.cross"; then
     sed -i 's/^werror = true$/werror = false/' "$qemu_src/build/config-meson.cross"
-    meson configure "$qemu_src/build" -Dwerror=false
+    bes_meson=$(sed -n 's/^MESON=//p' "$qemu_src/build/config-host.mak")
+    "$bes_meson" configure "$qemu_src/build" -Dwerror=false
 fi
 ninja -C "$qemu_src/build" qemu-system-arm
 "$qemu_src/build/qemu-system-arm" -M help | grep bes1503
