@@ -195,7 +195,7 @@
     },
     {
       "path": "build.sh",
-      "sha256": "f5cb17aaced29f59abcb305656b78dab845b59c1096f7210df22c3339152662b",
+      "sha256": "61793fec11b78a99f461db0dc46ccec3b7139696d78a8595ea1f03ad4c96b4b6",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "7073bf7d9571dd6f68d46ebd946420d1deae87a9",
       "original_sha256": "125141b31674d9d9be81c039c110157c3bddc2784a563a29204f793e48769885",
