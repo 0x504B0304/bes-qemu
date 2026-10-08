@@ -42,7 +42,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_invalid_types_ranges_bindings_and_unknown_keys(self):
-        mutations = [('abi', None, 2), ('board', 'width', 0), ('board', 'height', True),
+        mutations = [('abi', None, 3), ('board', 'width', 0), ('board', 'height', True),
                      ('board', 'touch_reset_gpio', 0), ('board', 'config_sha256', 'bad'),
                      ('board', 'unexpected', 1), ('firmware', 'board', 'other'),
                      ('firmware', 'mass_type_count', 2), ('firmware', 'ble_chunk_size', 22),

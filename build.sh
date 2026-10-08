@@ -5,7 +5,8 @@ qemu_commit=f671ce11d2a15a58ab752d7cf0b2890c9022c7ba
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 qemu_src=${MIBAND_QEMU_SRC:-/tmp/miband-qemu-8.2}
 
-command -v clang-23 >/dev/null
+bes_cc=${BES_CC:-clang-23}
+command -v "$bes_cc" >/dev/null
 command -v meson >/dev/null
 command -v ninja >/dev/null
 pkg-config --exists glib-2.0 pixman-1
@@ -29,7 +30,7 @@ python3 "$script_dir/tools/integrate_qemu.py" "$qemu_src"
 if [[ ! -f "$qemu_src/build/build.ninja" ]]; then
     (
         cd -- "$qemu_src"
-        CC=clang-23 ./configure \
+        CC="$bes_cc" ./configure \
             --target-list=arm-softmmu \
             --disable-docs --disable-tools --disable-user \
             --disable-guest-agent --disable-slirp \

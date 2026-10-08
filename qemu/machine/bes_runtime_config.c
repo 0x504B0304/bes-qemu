@@ -102,7 +102,19 @@ static void load_config(Object *obj, const char *path, Error **errp)
         error_setg(errp, "hardware-config is startup-only and may be set once");
         return;
     }
-    if (!g_file_get_contents(path, &text, &size, NULL) || size > 262144) {
+    if (!strcmp(path, "-")) {
+        /* Anonymous parent pipe: bounded, startup-only, never stored on disk. */
+#ifdef _WIN32
+        _setmode(_fileno(stdin), _O_BINARY);
+#endif
+        text = g_malloc(262145);
+        size = fread(text, 1, 262145, stdin);
+        if (ferror(stdin) || size > 262144 || memchr(text, 0, size)) {
+            error_setg(errp, "invalid hardware-config input stream");
+            return;
+        }
+        text[size] = 0;
+    } else if (!g_file_get_contents(path, &text, &size, NULL) || size > 262144) {
         error_setg(errp, "cannot read hardware-config (maximum 256 KiB)");
         return;
     }
@@ -112,12 +124,13 @@ static void load_config(Object *obj, const char *path, Error **errp)
     }
     QDict *d = qobject_to(QDict, root);
     require(d != NULL, "root object");
-    require(read_int(required(d, "abi"), 1, 1) == 1, "ABI");
+    int abi = read_int(required(d, "abi"), 1, 2);
     const QDictEntry *entry;
     for (entry = qdict_first(d); entry; entry = qdict_next(d, entry)) {
         require(!strcmp(entry->key, "abi") || !strcmp(entry->key, "board") ||
                 !strcmp(entry->key, "firmware") || !strcmp(entry->key, "audio") ||
-                !strcmp(entry->key, "binding_ui") || !strcmp(entry->key, "binding_auth"),
+                !strcmp(entry->key, "binding_ui") || !strcmp(entry->key, "binding_auth") ||
+                (abi == 2 && !strcmp(entry->key, "machine_properties")),
                 "unknown section");
     }
 #define LOAD(key, type, storage) \
@@ -128,6 +141,26 @@ static void load_config(Object *obj, const char *path, Error **errp)
     LOAD("binding_ui", MiBandBindingUiProfile, miband_binding_ui_profiles);
     LOAD("binding_auth", MiBandBindingAuthProfile, miband_binding_auth_profiles);
 #undef LOAD
+    if (qdict_haskey(d, "machine_properties")) {
+        QDict *properties = qobject_to(QDict, qdict_get(d, "machine_properties"));
+        require(properties != NULL, "machine properties object");
+        for (entry = qdict_first(properties); entry; entry = qdict_next(properties, entry)) {
+            require(strcmp(entry->key, "hardware-config") &&
+                    strcmp(entry->key, "type") && strcmp(entry->key, "kernel"),
+                    "reserved machine property");
+            QObject *value = entry->value;
+            if (qobject_type(value) == QTYPE_QSTRING) {
+                object_property_set_str(obj, entry->key, qstring_get_str(qobject_to(QString, value)), errp);
+            } else if (qobject_type(value) == QTYPE_QBOOL) {
+                object_property_set_bool(obj, entry->key, qbool_get_bool(qobject_to(QBool, value)), errp);
+            } else if (qobject_type(value) == QTYPE_QNUM) {
+                object_property_set_int(obj, entry->key, read_int(value, 0, INT64_MAX), errp);
+            } else {
+                error_setg(errp, "unsupported machine property value");
+            }
+            if (*errp) { qobject_unref(root); return; }
+        }
+    }
     MiBandBoardConfig *b = &miband_boards[0];
     MiBandFirmwareConfig *f = &miband_firmwares[0];
     if (qdict_haskey(d, "board")) {

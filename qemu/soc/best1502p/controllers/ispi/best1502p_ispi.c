@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "bes_host_file.h"
 #include "qemu/log.h"
 #include "hw/core/cpu.h"
 #include "qemu/timer.h"
@@ -73,7 +74,7 @@ static void rtc_save(Best1502pIspi *ispi)
     int64_t now = rtc_now_ns(ispi);
     g_autofree char *temporary = NULL;
     g_autofree char *parent = NULL;
-    int fd, dir;
+    int fd;
     size_t written = 0;
 
     if (!ispi->rtc_state_path) {
@@ -101,15 +102,14 @@ static void rtc_save(Best1502pIspi *ispi)
         }
         written += count;
     }
-    if (fsync(fd) || close(fd) || rename(temporary, ispi->rtc_state_path)) {
+    if (bes_data_sync(fd) || close(fd) || bes_replace(temporary, ispi->rtc_state_path)) {
         rtc_store_error("checkpoint commit failed");
     }
     parent = g_path_get_dirname(ispi->rtc_state_path);
-    dir = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir < 0 || fsync(dir)) {
+    if (bes_dir_sync(parent)) {
         rtc_store_error("checkpoint directory sync failed");
     }
-    close(dir);
+
 }
 
 static void rtc_checkpoint(void *opaque)

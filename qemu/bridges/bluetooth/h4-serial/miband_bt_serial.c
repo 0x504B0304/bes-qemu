@@ -9,13 +9,27 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __linux__
 #include <sys/eventfd.h>
+#endif
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+struct pollfd { int fd; short events, revents; };
+#define POLLIN 1
+#define POLLOUT 2
+#define POLLERR 4
+#define POLLHUP 8
+#define POLLNVAL 16
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -34,7 +48,10 @@ struct MiBandBtSerial {
     pthread_t io_thread, trace_thread;
     pthread_mutex_t lock;
     pthread_cond_t trace_cond;
-    int fd, wake_fd, trace_fd;
+    int fd, wake_fd, wake_write, trace_fd;
+#ifdef _WIN32
+    HANDLE wake_event;
+#endif
     bool stop, trace_started, trace_stop, trace_failed;
     unsigned rate;
     void (*notify)(void *);
@@ -64,12 +81,16 @@ static uint64_t serial_now(void)
 
 static void serial_wake(MiBandBtSerial *s)
 {
+#ifdef _WIN32
+    SetEvent(s->wake_event);
+#else
     uint64_t value = 1;
     ssize_t n;
     do {
-        n = write(s->wake_fd, &value, sizeof(value));
+        n = write(s->wake_write, &value, sizeof(value));
     } while (n < 0 && errno == EINTR);
     /* EAGAIN means an unread wakeup already exists. */
+#endif
 }
 
 static void serial_fail(MiBandBtSerial *s, const char *reason, int error)
@@ -141,7 +162,11 @@ static void *serial_trace_thread(void *opaque)
     SerialTrace entry;
     uint64_t sequence = 0;
     bool ok = true;
+    #ifdef __APPLE__
+    pthread_setname_np("miband-hci-log");
+#elif defined(__linux__)
     pthread_setname_np(pthread_self(), "miband-hci-log");
+#endif
     /* MBHCI001, then records: LE64 monotonic ns, LE64 epoch, LE64 sequence,
      * LE32 length, byte direction (0=RX,1=TX), three reserved bytes, raw bytes. */
     ok = trace_write(s->trace_fd, "MBHCI001", 8);
@@ -259,6 +284,9 @@ static bool serial_read_batch(MiBandBtSerial *s)
     uint8_t input[READ_SIZE];
     for (unsigned batch = 0; batch < IO_BATCH; batch++) {
         ssize_t n = read(s->fd, input, sizeof(input));
+#ifdef _WIN32
+        if (n == 0) { n = -1; errno = EAGAIN; }
+#endif
         int saved_errno = errno;
         uint64_t now = serial_now();
         pthread_mutex_lock(&s->lock);
@@ -355,7 +383,11 @@ static bool serial_write_batch(MiBandBtSerial *s)
 static void *serial_io_thread(void *opaque)
 {
     MiBandBtSerial *s = opaque;
+    #ifdef __APPLE__
+    pthread_setname_np("miband-hci-io");
+#elif defined(__linux__)
     pthread_setname_np(pthread_self(), "miband-hci-io");
+#endif
     for (;;) {
         struct pollfd pfd[2] = {{s->fd, POLLIN, 0}, {s->wake_fd, POLLIN, 0}};
         int timeout = -1;
@@ -374,7 +406,21 @@ static void *serial_io_thread(void *opaque)
             }
         }
         pthread_mutex_unlock(&s->lock);
+#ifdef _WIN32
+        int result = 1;
+        DWORD errors;
+        COMSTAT status;
+        if (!ClearCommError((HANDLE)_get_osfhandle(s->fd), &errors, &status)) {
+            pfd[0].revents = POLLERR;
+        } else {
+            if (status.cbInQue) pfd[0].revents |= POLLIN;
+            if (pfd[0].events & POLLOUT) pfd[0].revents |= POLLOUT;
+            DWORD wait = pfd[0].revents ? 0 : (timeout < 0 || timeout > 2 ? 2 : timeout);
+            if (WaitForSingleObject(s->wake_event, wait) == WAIT_OBJECT_0) pfd[1].revents = POLLIN;
+        }
+#else
         int result = poll(pfd, 2, timeout);
+#endif
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -383,9 +429,12 @@ static void *serial_io_thread(void *opaque)
             break;
         }
         if (pfd[1].revents & POLLIN) {
+#ifdef _WIN32
+            ResetEvent(s->wake_event);
+#else
             uint64_t value;
-            while (read(s->wake_fd, &value, sizeof(value)) < 0 && errno == EINTR) {
-            }
+            while (read(s->wake_fd, &value, sizeof(value)) < 0 && errno == EINTR) {}
+#endif
         }
         /* HUP is terminal even if a final fragment was buffered. Never report
          * the remaining stream as a successfully completed physical session. */
@@ -409,7 +458,9 @@ MiBandBtSerial *miband_serial_start(int fd, unsigned rate, const char *trace_pat
                                   char *error, size_t error_size)
 {
     MiBandBtSerial *s = calloc(1, sizeof(*s));
+#ifndef _WIN32
     sigset_t blocked, previous;
+#endif
     int rc;
     if (!s) {
         snprintf(error, error_size, "allocating HCI transport failed");
@@ -417,12 +468,22 @@ MiBandBtSerial *miband_serial_start(int fd, unsigned rate, const char *trace_pat
     }
     s->fd = fd;
     s->trace_fd = -1;
-    s->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (s->wake_fd < 0) {
-        snprintf(error, error_size, "HCI wake eventfd failed: %s", strerror(errno));
-        free(s);
-        return NULL;
-    }
+#ifdef _WIN32
+    s->wake_fd = s->wake_write = -1;
+    s->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!s->wake_event) { free(s); return NULL; }
+#elif defined(__linux__)
+    s->wake_fd = s->wake_write = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (s->wake_fd < 0) { free(s); return NULL; }
+#else
+    int wake_pipe[2];
+    if (pipe(wake_pipe)) { free(s); return NULL; }
+    s->wake_fd = wake_pipe[0]; s->wake_write = wake_pipe[1];
+    fcntl(s->wake_fd, F_SETFL, O_NONBLOCK);
+    fcntl(s->wake_write, F_SETFL, O_NONBLOCK);
+    fcntl(s->wake_fd, F_SETFD, FD_CLOEXEC);
+    fcntl(s->wake_write, F_SETFD, FD_CLOEXEC);
+#endif
     pthread_mutex_init(&s->lock, NULL);
     pthread_cond_init(&s->trace_cond, NULL);
     s->rate = rate;
@@ -433,8 +494,10 @@ MiBandBtSerial *miband_serial_start(int fd, unsigned rate, const char *trace_pat
     pthread_mutex_unlock(&epoch_lock);
     /* Workers inherit blocked signals. Restore the caller's mask immediately
      * after creating the threads, as QemuThread does for auxiliary threads. */
+#ifndef _WIN32
     sigfillset(&blocked);
     pthread_sigmask(SIG_SETMASK, &blocked, &previous);
+#endif
     if (trace_path && trace_path[0]) {
         s->trace_fd = open(trace_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         if (s->trace_fd < 0) {
@@ -461,11 +524,20 @@ MiBandBtSerial *miband_serial_start(int fd, unsigned rate, const char *trace_pat
         }
         goto fail;
     }
+#ifndef _WIN32
     pthread_sigmask(SIG_SETMASK, &previous, NULL);
+#endif
     return s;
 fail:
+#ifndef _WIN32
     pthread_sigmask(SIG_SETMASK, &previous, NULL);
+#endif
+#ifdef _WIN32
+    CloseHandle(s->wake_event);
+#else
     close(s->wake_fd);
+    if (s->wake_write != s->wake_fd) close(s->wake_write);
+#endif
     pthread_cond_destroy(&s->trace_cond);
     pthread_mutex_destroy(&s->lock);
     free(s);
@@ -548,7 +620,12 @@ void miband_serial_stop(MiBandBtSerial *s)
         pthread_mutex_unlock(&s->lock);
         pthread_join(s->trace_thread, NULL);
     }
+#ifdef _WIN32
+    CloseHandle(s->wake_event);
+#else
     close(s->wake_fd);
+    if (s->wake_write != s->wake_fd) close(s->wake_write);
+#endif
     pthread_cond_destroy(&s->trace_cond);
     pthread_mutex_destroy(&s->lock);
     free(s);

@@ -8,6 +8,7 @@
  * hook addresses.
  */
 #include "qemu/osdep.h"
+#include "bes_runtime_config.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/arm/armv7m.h"
@@ -3171,6 +3172,7 @@ static void best1700_bth_spi_clock(void *opaque, unsigned index, uint32_t hz)
 
 static void best1700_init(MachineState *machine)
 {
+    bes_runtime_config_lock();
     Best1700MachineState *s = MIBAND_BEST1700(machine);
     static const hwaddr i2c_base[BEST1700_I2C_COUNT] = {
         0x40006000, 0x40007000, 0x40075000, 0x40076000, 0x40077000,
@@ -3676,6 +3678,7 @@ static void best1700_idau_check(IDAUInterface *ii, uint32_t address,
 
 static void best1700_machine_class_init(ObjectClass *oc, void *data)
 {
+    bes_runtime_config_property(oc);
     MachineClass *mc = MACHINE_CLASS(oc);
     IDAUInterfaceClass *iic = IDAU_INTERFACE_CLASS(oc);
     iic->check = best1700_idau_check;

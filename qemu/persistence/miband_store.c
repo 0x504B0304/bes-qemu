@@ -4,7 +4,7 @@
 #include "miband_store.h"
 #include <glib.h>
 #include <zlib.h>
-#include <sys/file.h>
+#include "bes_host_file.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,7 +55,7 @@ static size_t read_all(int fd, void *data, size_t length)
     return used;
 }
 static void sync_file(int fd)
-{ if (fdatasync(fd)) fail("fdatasync failed; guest operation not acknowledged"); }
+{ if (bes_data_sync(fd)) fail("fdatasync failed; guest operation not acknowledged"); }
 static void validate(MiBandStore *s,unsigned type,unsigned addr,unsigned size)
 {
     if ((type==MB_STORE_NOR && size && addr<s->nor_bytes && size<=s->nor_bytes-addr) ||
@@ -89,7 +89,7 @@ MiBandStore *miband_store_open_geometry(const char *path,const uint8_t base[32],
     char *lock_path=g_strconcat(path,".lock",NULL);
     s->lock=open(lock_path,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
     g_free(lock_path);
-    if (s->lock<0 || flock(s->lock,LOCK_EX|LOCK_NB)) fail("state is locked or inaccessible");
+    if (s->lock<0 || bes_file_lock(s->lock)) fail("state is locked or inaccessible");
     s->fd=open(path,O_RDWR|O_CLOEXEC|O_NOFOLLOW);
     uint8_t header[64]={0},*nor=g_malloc(nor_bytes);
     if (s->fd<0 && errno==ENOENT) {
@@ -101,9 +101,8 @@ MiBandStore *miband_store_open_geometry(const char *path,const uint8_t base[32],
         memcpy(header+32,base,32);
         write_all(s->fd,header,sizeof(header));write_all(s->fd,seed,nor_bytes);sync_file(s->fd);
         char *parent=g_path_get_dirname(path);
-        int dir=open(parent,O_RDONLY|O_DIRECTORY|O_CLOEXEC);g_free(parent);
-        if (dir<0 || fsync(dir)) fail("directory sync failed");
-        close(dir);
+        if (bes_dir_sync(parent)) fail("directory sync failed");
+        g_free(parent);
         memcpy(nor,seed,nor_bytes);
     } else {
         struct stat st;

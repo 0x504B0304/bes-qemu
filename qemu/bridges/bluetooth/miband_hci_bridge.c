@@ -7,8 +7,13 @@
 #include "miband_hci_bridge.h"
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <termios.h>
+#else
+#include <windows.h>
+#include <io.h>
+#endif
 #include <unistd.h>
 #ifndef AF_BLUETOOTH
 #define AF_BLUETOOTH 31
@@ -20,7 +25,7 @@
 #define HCI_CHANNEL_RAW 0
 #endif
 struct miband_sockaddr_hci {
-    sa_family_t hci_family;
+    unsigned short hci_family;
     unsigned short hci_dev, hci_channel;
 };
 #define MIBAND_BT_PACKET_MAX 2048
@@ -185,6 +190,10 @@ bool miband_hci_bridge_queue(MiBandHciBridge *bridge, const uint8_t *data,
 
 bool miband_hci_bridge_open_host(MiBandHciBridge *bridge, unsigned dev)
 {
+#ifndef __linux__
+    /* Raw HCI sockets are a Linux interface. Native serial remains available. */
+    return false;
+#else
     struct miband_sockaddr_hci address;
     int flags;
 
@@ -216,8 +225,10 @@ bool miband_hci_bridge_open_host(MiBandHciBridge *bridge, unsigned dev)
     qemu_set_fd_handler(bridge->host_fd, bridge_read_ready, NULL, bridge);
     qemu_log_mask(LOG_UNIMP, "miband BT host backend active hci%u\n", dev);
     return true;
+#endif
 }
 
+#ifndef _WIN32
 static speed_t bridge_serial_speed(unsigned baud)
 {
     switch (baud) {
@@ -234,9 +245,26 @@ static speed_t bridge_serial_speed(unsigned baud)
     }
 }
 
+#endif
+
 bool miband_hci_bridge_open_serial(MiBandHciBridge *bridge, const char *path,
                                   unsigned baud)
 {
+#ifdef _WIN32
+    miband_hci_bridge_close(bridge);
+    g_autofree char *device = g_str_has_prefix(path, "COM") ? g_strconcat("\\\\.\\", path, NULL) : g_strdup(path);
+    HANDLE handle = CreateFileA(device, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    DCB dcb = { .DCBlength = sizeof(DCB) };
+    COMMTIMEOUTS timeout = { .ReadIntervalTimeout = MAXDWORD, .WriteTotalTimeoutConstant = 20 };
+    if (!GetCommState(handle, &dcb)) { CloseHandle(handle); return false; }
+    dcb.BaudRate = baud; dcb.ByteSize = 8; dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE; dcb.fOutxCtsFlow = FALSE; dcb.fOutxDsrFlow = FALSE;
+    dcb.fOutX = dcb.fInX = FALSE; dcb.fDtrControl = DTR_CONTROL_DISABLE; dcb.fRtsControl = RTS_CONTROL_DISABLE;
+    if (!SetCommState(handle, &dcb) || !SetCommTimeouts(handle, &timeout)) { CloseHandle(handle); return false; }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_BINARY);
+    if (fd < 0) { CloseHandle(handle); return false; }
+#else
     struct termios term;
     speed_t speed;
     int fd;
@@ -276,11 +304,14 @@ bool miband_hci_bridge_open_serial(MiBandHciBridge *bridge, const char *path,
         close(fd);
         return false;
     }
+#endif
     bridge->host_fd = fd;
     bridge->host_active = true;
     bridge->serial_active = true;
     bridge->serial_rx_len = 0;
+#ifndef _WIN32
     qemu_set_fd_handler(fd, bridge_read_ready, NULL, bridge);
+#endif
     qemu_log_mask(LOG_UNIMP,
                   "miband BT serial backend active path=%s baud=%u\n",
                   path, baud);
