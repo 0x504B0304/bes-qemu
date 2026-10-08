@@ -8,11 +8,12 @@ import subprocess
 import tempfile
 
 repo=Path(__file__).resolve().parent
-assert 'clang version 23.' in subprocess.check_output(['clang-23','--version'],text=True)
+compiler=os.environ.get('BES_CC', 'gcc' if os.name=='nt' else 'clang-23')
+print(subprocess.check_output([compiler,'--version'],text=True).splitlines()[0])
 with tempfile.TemporaryDirectory(prefix='miband-store-test-') as tmp:
-    tmp=Path(tmp);exe=tmp/'test';state=tmp/'flash'
+    tmp=Path(tmp);exe=tmp/('test.exe' if os.name=='nt' else 'test');state=tmp/'flash'
     flags=shlex.split(subprocess.check_output(['pkg-config','--cflags','--libs','glib-2.0','zlib'],text=True))
-    subprocess.run(['clang-23','-Wall','-Wextra','-Wno-unused-parameter','-Werror',
+    subprocess.run([compiler,'-Wall','-Wextra','-Wno-unused-parameter','-Werror',
                     str(repo/'test_flash_store.c'),str(source_file('miband_store.c')),*include_flags(),*flags,'-o',str(exe)],check=True)
     def run(mode,good=True,geometry=None):
         p=subprocess.run([str(exe),mode,str(state)] + ([geometry] if geometry else []),capture_output=True,text=True)

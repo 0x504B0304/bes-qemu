@@ -21,11 +21,11 @@
 #include <sys/eventfd.h>
 #endif
 #ifdef _WIN32
-#include <windows.h>
-#include <io.h>
 #ifdef MIBAND_SERIAL_STANDALONE
 #include <winsock2.h>
 #endif
+#include <windows.h>
+#include <io.h>
 #ifndef O_CLOEXEC
 #define O_CLOEXEC O_NOINHERIT
 #endif

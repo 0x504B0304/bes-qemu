@@ -132,11 +132,20 @@ static bool miband_hci_bridge_flush(MiBandHciBridge *bridge)
             remaining = MIN(remaining, 64u);
         }
 
-        sent = bridge->serial_active ?
-            write(bridge->host_fd, bridge->host_tx[head] + bridge->host_tx_offset,
-                  remaining) :
-            send(bridge->host_fd, bridge->host_tx[head] + bridge->host_tx_offset,
-                 length - bridge->host_tx_offset, MSG_DONTWAIT);
+        if (bridge->serial_active) {
+            sent = write(bridge->host_fd,
+                         bridge->host_tx[head] + bridge->host_tx_offset, remaining);
+        } else {
+#ifdef __linux__
+            sent = send(bridge->host_fd,
+                        bridge->host_tx[head] + bridge->host_tx_offset,
+                        length - bridge->host_tx_offset, MSG_DONTWAIT);
+#else
+            /* Raw HCI sockets are only opened by the Linux backend. */
+            errno = ENOSYS;
+            sent = -1;
+#endif
+        }
         if (sent > 0) {
             if (bridge->serial_active && bridge->serial_tx_rate) {
                 int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -364,11 +373,15 @@ unsigned miband_hci_bridge_next_packet(MiBandHciBridge *bridge, uint8_t *packet)
 {
     if (!bridge->host_active || bridge->host_fd < 0) return 0;
     if (!bridge->serial_active) {
+#ifdef __linux__
         ssize_t size = recv(bridge->host_fd, packet, MIBAND_BT_PACKET_MAX, MSG_DONTWAIT);
         if (size < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             qemu_log_mask(LOG_UNIMP, "miband BT host receive failed errno=%d\n", errno);
         }
         return size > 0 ? size : 0;
+#else
+        return 0;
+#endif
     }
     for (;;) {
         while (bridge->serial_rx_len) {

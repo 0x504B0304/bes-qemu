@@ -195,7 +195,7 @@
     },
     {
       "path": "build.sh",
-      "sha256": "8aa135c652724dddd304148114fffc73427eb5789e6d9e07aac936d065fb5afb",
+      "sha256": "b1ee8e8e2c136f9bbff648e0e3201175af6d466589192b4c51388fc254335f82",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "7073bf7d9571dd6f68d46ebd946420d1deae87a9",
       "original_sha256": "125141b31674d9d9be81c039c110157c3bddc2784a563a29204f793e48769885",
@@ -1172,7 +1172,7 @@
     },
     {
       "path": "qemu/bridges/bluetooth/h4-serial/miband_bt_serial.c",
-      "sha256": "b684c477563617f4db943695218a2c15e85b7d5fb9a81506c6da178fb146a43b",
+      "sha256": "5008eba135dd5774630b6ded8bb14e025fb3596c83bc559d001fd4f25d229891",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "01b2d5316f76a6430a7e31f94b5dcdd44d46ae3c",
       "original_sha256": "a2eecd72f1c6f837b622b0c1386d10d695119190f96678bbf1b7ff223415f36e",
@@ -1242,7 +1242,7 @@
     },
     {
       "path": "qemu/bridges/bluetooth/miband_hci_bridge.c",
-      "sha256": "df3125a737b47e4221c71a72e18900f12792ff22a99bd6c37efda2bc19b3c7e5",
+      "sha256": "04aa63f54a9db1c8cc71d1636445d5cf6be7dded9b3442b85ae48d949d93087b",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "ac98470ab1baf6c403844be5a7c530d71b8a768a",
       "original_sha256": "6e30183c67bd0a76213c3d69b4c519c7c56fbc74ade809e3ddc90e70bedf5c62",
@@ -6470,7 +6470,7 @@
     },
     {
       "path": "tests/test_flash_store.py",
-      "sha256": "e375cba27a63154b501e83dfbad631b82744481f0351d69a6096cef1cf71fd8f",
+      "sha256": "cf2941e80858969ed89e31b20522fee8196a919ed94e92e2ab3de15a33c35060",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "6abd9e7e1ee2f3a93a4db252ae25775120ee7c1d",
       "original_sha256": "38660e7728f1611ef87d46ecff0d99ee93d68da1f6822522c1f9ca6ed03f493f",
@@ -7288,6 +7288,24 @@
       "proprietary_release_approved": false,
       "publish_source_for_review": true,
       "distribution_obligation": "Preserve source and original notices; assess applicable licenses per file."
+    },
+    {
+      "path": "tools/prepare_windows_build.py",
+      "source_commit": null,
+      "original_git_blob": null,
+      "original_sha256": null,
+      "declared_license": [
+        "GPL-2.0-or-later"
+      ],
+      "notices": [
+        "# SPDX-License-Identifier: GPL-2.0-or-later"
+      ],
+      "technical_independence": "public-core-support",
+      "rights_status": "new-task-file-review-required",
+      "independent_proprietary_use_basis": false,
+      "proprietary_release_approved": false,
+      "publish_source_for_review": true,
+      "sha256": "990077b7e1fd14f37c2cb08c897c23dd67a0c009080b08f9dc22a8ff1e8e523d"
     },
     {
       "path": "tools/qemu_backport.py",

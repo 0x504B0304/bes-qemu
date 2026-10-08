@@ -26,8 +26,11 @@ if [[ "$actual_commit" != "$qemu_commit" ]]; then
 fi
 
 python3 "$script_dir/tools/integrate_qemu.py" "$qemu_src"
+case "$(uname -s)" in
+    MINGW*|MSYS*) python3 "$script_dir/tools/prepare_windows_build.py" "$qemu_src" ;;
+esac
 
-if [[ ! -f "$qemu_src/build/build.ninja" ]]; then
+if [[ ! -f "$qemu_src/build/build.ninja" || ! -f "$qemu_src/build/meson-private/build.dat" ]]; then
     (
         cd -- "$qemu_src"
         CC="$bes_cc" ./configure \
