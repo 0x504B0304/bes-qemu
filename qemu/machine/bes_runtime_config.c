@@ -96,6 +96,7 @@ static QList *read_array(QObject *o, size_t low, size_t high)
 
 static void load_config(Object *obj, const char *path, Error **errp)
 {
+    ERRP_GUARD();
     g_autofree char *text = NULL;
     gsize size;
     if (locked || config_path) {

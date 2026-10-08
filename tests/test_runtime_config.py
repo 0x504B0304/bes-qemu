@@ -12,6 +12,28 @@ from tools.synthetic_config import configuration
 
 @unittest.skipUnless(os.environ.get('MIBAND_QEMU'), 'set MIBAND_QEMU to run ABI integration')
 class RuntimeConfigTests(unittest.TestCase):
+    def pipe_config(self, payload):
+        with tempfile.TemporaryDirectory() as tmp:
+            guest=Path(tmp)/'synthetic.bin'
+            guest.write_bytes(bytes.fromhex('202001a1abbefee72600020000000000'))
+            return subprocess.run([os.environ['MIBAND_QEMU'],'-M','bes1503,hardware-config=-',
+                '-kernel',str(guest),'-display','none','-monitor','none','-serial','null',
+                '-semihosting-config','enable=on,target=native'],input=payload,
+                capture_output=True,timeout=10)
+
+    def test_bounded_stdin_and_abi2_properties(self):
+        data=configuration();data['abi']=2
+        data['machine_properties']={'diag-skip-binding':False}
+        result=self.pipe_config(json.dumps(data).encode())
+        self.assertEqual(result.returncode,0,result.stderr)
+        for payload in (b' '*262145,b'{}\x00',b'',b'{broken'):
+            with self.subTest(payload=payload[:20]):
+                self.assertNotEqual(self.pipe_config(payload).returncode,0)
+        for properties in ({'hardware-config':'-'},{'kernel':'x'},{'type':'x'},
+                           {'missing-property':True},{'diag-skip-binding':[]}):
+            data['machine_properties']=properties
+            self.assertNotEqual(self.pipe_config(json.dumps(data).encode()).returncode,0)
+
     def run_config(self, data, commands='quit\n', qmp=False, guest_bytes=None):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp)/'config.json'

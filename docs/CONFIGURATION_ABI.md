@@ -1,4 +1,8 @@
-# Startup hardware configuration ABI 1
+# Startup hardware configuration ABI 1 / 2
+
+ABI 2 adds `machine_properties`, an object of existing scalar QOM startup properties. Strings, booleans and nonnegative integers are supported; `type`, `kernel` and recursive `hardware-config` are rejected. All supported machines accept this interface, including BEST1700. Values are applied once before machine initialization.
+
+`hardware-config=-` reads one bounded JSON document from standard input through EOF. The caller must close the pipe after writing. Maximum size is 256 KiB, embedded NUL is rejected, and Windows uses binary input. Do not share this stdin with a monitor or serial console. The existing file entry remains available to all users, independently of any external product entitlement.
 
 `-M bes1503,hardware-config=/absolute/path/config.json` 在机器初始化阶段解析数据一次；BEST1502P 的现有机器入口也接受同一参数以加载通用软件补丁数据。BEST1700 继续使用既有启动属性，数据由外部编排器传入。
 

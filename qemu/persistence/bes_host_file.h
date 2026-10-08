@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <glib/gstdio.h>
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
@@ -28,7 +29,12 @@ static inline int bes_data_sync(int fd) { return _commit(fd); }
 static inline int bes_dir_sync(const char *path) { (void)path; return 0; }
 static inline int bes_replace(const char *from, const char *to)
 {
-    if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return 0;
+    gunichar2 *wide_from = g_utf8_to_utf16(from, -1, NULL, NULL, NULL);
+    gunichar2 *wide_to = g_utf8_to_utf16(to, -1, NULL, NULL, NULL);
+    BOOL ok = wide_from && wide_to && MoveFileExW((WCHAR *)wide_from,
+        (WCHAR *)wide_to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    g_free(wide_from); g_free(wide_to);
+    if (ok) return 0;
     errno = EIO; return -1;
 }
 #else

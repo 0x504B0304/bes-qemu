@@ -7,9 +7,9 @@ import struct
 import time
 import gdb
 
-profile = json.loads(os.environ["MIBAND_QUICKAPP_PROFILE"])
-operation = os.environ["MIBAND_QUICKAPP_OPERATION"]
-output = Path(os.environ["MIBAND_QUICKAPP_OUTPUT"])
+profile = json.loads(getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_PROFILE"])
+operation = getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_OPERATION"]
+output = Path(getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_OUTPUT"])
 functions = {key: int(value, 0) for key, value in profile["functions"].items()}
 quickapp = profile["quickapp"]
 qfunctions = {key: int(value, 0) for key, value in quickapp["functions"].items()}
@@ -133,7 +133,7 @@ def run():
             result = {"ok": True, "files": query_files()}
         elif operation == "install":
             stage = "install firmware package"
-            package = Path(os.environ["MIBAND_QUICKAPP_PACKAGE"]).read_bytes()
+            package = Path(getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_PACKAGE"]).read_bytes()
             if not package or len(package) > 64 * 1024 * 1024:
                 raise RuntimeError("unsupported quick-app package")
             write_file(profile["quickapp"]["staging"], package)
@@ -157,13 +157,13 @@ def run():
                       "files": {}}
         elif operation == "launch":
             stage = "launch firmware package"
-            name = os.environ["MIBAND_QUICKAPP_NAME"].encode() + b"\0"; write(PATH, name)
+            name = getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_NAME"].encode() + b"\0"; write(PATH, name)
             if call("launch_app", PATH) != 0: raise RuntimeError("firmware quickapp_launch_app failed")
-            result = {"ok": True, "packageName": os.environ["MIBAND_QUICKAPP_NAME"],
+            result = {"ok": True, "packageName": getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_NAME"],
                       "files": query_files()}
         elif operation == "delete":
             stage = "delete firmware package"
-            name = os.environ["MIBAND_QUICKAPP_NAME"].encode() + b"\0"
+            name = getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_NAME"].encode() + b"\0"
             write(PATH, name)
             state = SCRATCH + 0x2000
             write(state, b"\0" * 16)
@@ -175,7 +175,7 @@ def run():
             write(state + 4, b"\x01")
             if call("quickapp_delete_package", PATH, state) != 0:
                 raise RuntimeError("firmware quickapp config removal failed")
-            result = {"ok": True, "packageName": os.environ["MIBAND_QUICKAPP_NAME"],
+            result = {"ok": True, "packageName": getattr(gdb, "miband_context", os.environ)["MIBAND_QUICKAPP_NAME"],
                       "deleted": True, "files": query_files()}
         else: raise RuntimeError("unknown native quick-app operation")
     finally:

@@ -1,7 +1,7 @@
 import json, os, gdb
 from pathlib import Path
-cfg = json.loads(os.environ['MIBAND_INPUT_CONFIG'])
-value = json.loads(os.environ['MIBAND_INPUT_VALUE'])
+cfg = json.loads(getattr(gdb, "miband_context", os.environ)['MIBAND_INPUT_CONFIG'])
+value = json.loads(getattr(gdb, "miband_context", os.environ)['MIBAND_INPUT_VALUE'])
 safe = int(cfg['safe_context'], 0)
 functions = {k: int(v, 0) for k, v in cfg['functions'].items()}
 diagnostic = {}
@@ -72,4 +72,4 @@ def run():
     return {'ok': True, 'trace': trace}
 try: result = run()
 except Exception as exc: result = {'ok': False, 'error': str(exc), 'diagnostic': diagnostic}
-Path(os.environ['MIBAND_INPUT_OUTPUT']).write_text(json.dumps(result))
+Path(getattr(gdb, "miband_context", os.environ)['MIBAND_INPUT_OUTPUT']).write_text(json.dumps(result))

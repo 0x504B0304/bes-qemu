@@ -87,13 +87,13 @@ MiBandStore *miband_store_open_geometry(const char *path,const uint8_t base[32],
     MiBandStore *s=g_new0(MiBandStore,1);
     s->nor_bytes=nor_bytes;s->page_bytes=page_bytes;s->page_count=page_count;
     char *lock_path=g_strconcat(path,".lock",NULL);
-    s->lock=open(lock_path,O_RDWR|O_CREAT|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
+    s->lock=g_open(lock_path,O_RDWR|O_CREAT|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
     g_free(lock_path);
     if (s->lock<0 || bes_file_lock(s->lock)) fail("state is locked or inaccessible");
-    s->fd=open(path,O_RDWR|O_BINARY|O_CLOEXEC|O_NOFOLLOW);
+    s->fd=g_open(path,O_RDWR|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
     uint8_t header[64]={0},*nor=g_malloc(nor_bytes);
     if (s->fd<0 && errno==ENOENT) {
-        s->fd=open(path,O_RDWR|O_CREAT|O_EXCL|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
+        s->fd=g_open(path,O_RDWR|O_CREAT|O_EXCL|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
         if (s->fd<0) fail("cannot create state");
         memcpy(header,"MBFLASH1",8);
         put32(header+8,nor_bytes);put32(header+12,page_bytes);put32(header+16,page_count);

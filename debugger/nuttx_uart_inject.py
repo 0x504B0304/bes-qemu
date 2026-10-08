@@ -1,9 +1,9 @@
 import gdb, json, os, struct
 from pathlib import Path
-cfg = json.loads(os.environ['MIBAND_NSH_CONFIG'])
-blob = bytes.fromhex(os.environ['MIBAND_NSH_PAYLOAD'])
-meta = json.loads(os.environ['MIBAND_NSH_LAYOUT'])
-output = Path(os.environ['MIBAND_NSH_OUTPUT'])
+cfg = json.loads(getattr(gdb, "miband_context", os.environ)['MIBAND_NSH_CONFIG'])
+blob = bytes.fromhex(getattr(gdb, "miband_context", os.environ)['MIBAND_NSH_PAYLOAD'])
+meta = json.loads(getattr(gdb, "miband_context", os.environ)['MIBAND_NSH_LAYOUT'])
+output = Path(getattr(gdb, "miband_context", os.environ)['MIBAND_NSH_OUTPUT'])
 safe = int(cfg['trigger'], 0)
 f = {k: int(v, 0) for k, v in cfg['functions'].items()}
 low, high = (int(v, 0) for v in cfg['heap_range'])

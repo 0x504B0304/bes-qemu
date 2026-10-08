@@ -2,11 +2,11 @@ import base64, json, os, hashlib
 from pathlib import Path
 import gdb
 
-profile = json.loads(os.environ['MIBAND_QUERY_PROFILE'])
+profile = json.loads(getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_PROFILE'])
 cfg = profile['native_query']
-output = Path(os.environ['MIBAND_QUERY_OUTPUT'])
-kind = os.environ['MIBAND_QUERY_KIND']
-operation = os.environ.get('MIBAND_QUERY_OPERATION', 'query')
+output = Path(getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_OUTPUT'])
+kind = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_KIND']
+operation = getattr(gdb, "miband_context", os.environ).get('MIBAND_QUERY_OPERATION', 'query')
 safe = int(cfg['safe_context'], 0)
 functions = {k: int(v, 0) for k, v in cfg['functions'].items()}
 low, high = (int(v, 0) for v in cfg['heap_range'])
@@ -152,7 +152,7 @@ def run():
         allocated.append(pathbuf)
         files = query_files()
         if operation == 'set':
-            resource_id = os.environ['MIBAND_QUERY_ID']
+            resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
             if kind != 'watchface' or not selected(files, resource_id):
                 raise ResourceRejected('not an installed normal watchface')
             write(pathbuf, resource_id.encode('ascii') + b'\0')
@@ -168,7 +168,7 @@ def run():
             if not selected(files, resource_id, True):
                 raise RuntimeError('native index did not confirm current watchface')
         elif operation == 'launch':
-            resource_id = os.environ['MIBAND_QUERY_ID']
+            resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
             installed = json.loads(base64.b64decode(files[cfg['files']['quickapp'][0]]))['InstalledApps']
             if kind != 'quickapp' or resource_id in uninstalled or resource_id not in {a['package'] for a in installed}:
                 raise ResourceRejected('quickapp is not installed')
@@ -180,7 +180,7 @@ def run():
                 raise ResourceRejected('firmware rejected quickapp launch')
         elif operation == 'install' and kind == 'watchface':
             install = cfg['watchface_install']
-            payload = Path(os.environ['MIBAND_QUERY_PACKAGE']).read_bytes()
+            payload = Path(getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_PACKAGE']).read_bytes()
             if payload[:4] != bytes.fromhex('5aa53412') or not 0 < len(payload) <= install['max_package_bytes']:
                 raise RuntimeError('invalid watchface package')
             buffer = call('malloc', len(payload))
@@ -188,7 +188,7 @@ def run():
                 raise RuntimeError('guest watchface allocation failed')
             allocated.append(buffer)
             write(buffer, payload)
-            staged = os.environ['MIBAND_QUERY_STAGE']
+            staged = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_STAGE']
             write(pathbuf, staged.encode() + b'\0')
             if call('write_file', pathbuf, 32, buffer, len(payload)) != 0:
                 raise RuntimeError('firmware watchface staging failed')
@@ -264,7 +264,7 @@ def run():
                                 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest(),
                                 'installEvents': responses}
         elif operation == 'delete' and kind == 'watchface':
-            resource_id = os.environ['MIBAND_QUERY_ID']
+            resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
             if not selected(files, resource_id):
                 raise ResourceRejected('not an installed normal watchface')
             write(pathbuf, resource_id.encode() + b'\0')
@@ -281,7 +281,7 @@ def run():
             engine = u32(install['engine_global'])
             if not low <= engine <= high - 64 or read(engine + install['busy_offset'], 1)[0] == 2:
                 raise RuntimeError('native installer unavailable or busy')
-            payload = Path(os.environ['MIBAND_QUERY_PACKAGE']).read_bytes()
+            payload = Path(getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_PACKAGE']).read_bytes()
             if not 0 < len(payload) <= install['max_package_bytes']:
                 raise RuntimeError('invalid package size')
             buffer = call('malloc', len(payload))
@@ -289,7 +289,7 @@ def run():
                 raise RuntimeError('guest package allocation failed')
             allocated.append(buffer)
             write(buffer, payload)
-            write(pathbuf, os.environ['MIBAND_QUERY_STAGE'].encode() + b'\0')
+            write(pathbuf, getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_STAGE'].encode() + b'\0')
             if call('write_file', pathbuf, 32, buffer, len(payload)) != 0:
                 raise RuntimeError('firmware package staging failed')
             call('free', buffer); allocated.remove(buffer)
@@ -315,12 +315,12 @@ def run():
         elif operation == 'install_verify':
             # The worker finished and we reacquired the main event loop with
             # a fresh register snapshot. Cleanup only our temporary package.
-            write(pathbuf, os.environ['MIBAND_QUERY_STAGE'].encode() + b'\0')
+            write(pathbuf, getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_STAGE'].encode() + b'\0')
             cleaned_by_callback = (cfg['quickapp_install'].get('abi') == 'loop_path' and
                                    any(e['status'] == 0 for e in install_events))
             if not cleaned_by_callback and call('unlink', pathbuf) != 0:
                 raise RuntimeError('native package cleanup failed')
-            resource_id = os.environ['MIBAND_QUERY_ID']
+            resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
             if (resource_id in uninstalled and
                     any(e.get('package') == resource_id and e['status'] == 0 for e in install_events)):
                 write(pathbuf, resource_id.encode() + b'\0')
@@ -337,7 +337,7 @@ def run():
                     raise RuntimeError('native restored app registration failed')
                 files = query_files()
         elif operation == 'delete':
-            resource_id = os.environ['MIBAND_QUERY_ID']
+            resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
             installed = json.loads(base64.b64decode(files[cfg['files']['quickapp'][0]]))['InstalledApps']
             if resource_id not in {a['package'] for a in installed} or resource_id in uninstalled:
                 raise ResourceRejected('quickapp is not installed')
@@ -377,7 +377,7 @@ try:
         install_bp.delete(); install_bp = None
         operation = 'install_verify'
         result = run()
-        resource_id = os.environ['MIBAND_QUERY_ID']
+        resource_id = getattr(gdb, "miband_context", os.environ)['MIBAND_QUERY_ID']
         result['installEvents'] = install_events
         installed = json.loads(base64.b64decode(result['files'][cfg['files']['quickapp'][0]]))['InstalledApps']
         if (not any(e.get('package') == resource_id and e['status'] == 0 for e in install_events)

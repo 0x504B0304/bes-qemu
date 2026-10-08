@@ -5,9 +5,9 @@ from pathlib import Path
 import time
 import gdb
 
-profile = json.loads(os.environ["MIBAND_WATCHFACE_PROFILE"])
-operation = os.environ["MIBAND_WATCHFACE_OPERATION"]
-output = Path(os.environ["MIBAND_WATCHFACE_OUTPUT"])
+profile = json.loads(getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_PROFILE"])
+operation = getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_OPERATION"]
+output = Path(getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_OUTPUT"])
 functions = {key: int(value, 0) for key, value in profile["functions"].items()}
 cfg = profile["gdb"]
 SCRATCH = int(cfg["scratch"], 0)
@@ -151,7 +151,7 @@ def run():
         if operation == "query":
             result = {"ok": True, "files": query_files()}
         elif operation == "install":
-            package = Path(os.environ["MIBAND_WATCHFACE_PACKAGE"]).read_bytes()
+            package = Path(getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_PACKAGE"]).read_bytes()
             if not package or len(package) > 4 * 1024 * 1024 or package[:4] != bytes.fromhex("5aa53412"): raise RuntimeError("unsupported watchface package")
             staging = profile["files"]["staging"]; write_file(staging, package)
             write(PATH, staging.encode() + b"\0"); base = call("base_get", PATH)
@@ -165,7 +165,7 @@ def run():
             call("base_release", base)
             result = {"ok": True, "watchfaceId": watchface_id, "size": len(package), "sha256": hashlib.sha256(package).hexdigest(), "current": True, "files": query_files()}
         elif operation == "set":
-            watchface_id = os.environ["MIBAND_WATCHFACE_ID"]
+            watchface_id = getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_ID"]
             base, path = resource_base(watchface_id)
             if not base: raise RuntimeError("base_get failed for watchface resource")
             try:
@@ -174,7 +174,7 @@ def run():
             finally: call("base_release", base)
             result = {"ok": True, "watchfaceId": watchface_id, "current": True, "files": query_files()}
         elif operation == "delete":
-            watchface_id = os.environ["MIBAND_WATCHFACE_ID"]; write(PATH, watchface_id.encode() + b"\0")
+            watchface_id = getattr(gdb, "miband_context", os.environ)["MIBAND_WATCHFACE_ID"]; write(PATH, watchface_id.encode() + b"\0")
             if call("delete_watchface", PATH) != 0: raise RuntimeError("firmware delete_watchface failed")
             refresh(1); result = {"ok": True, "watchfaceId": watchface_id, "deleted": True, "files": query_files()}
         else: raise RuntimeError("unknown native operation")

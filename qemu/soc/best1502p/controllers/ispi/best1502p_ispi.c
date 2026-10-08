@@ -135,7 +135,7 @@ void best1502p_ispi_open_rtc(Best1502pIspi *ispi, const char *flash_path,
 
     ispi->rtc_state_path = g_strconcat(flash_path, ".rtc", NULL);
     memcpy(ispi->rtc_image_digest, digest, 32);
-    fd = open(ispi->rtc_state_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    fd = g_open(ispi->rtc_state_path, O_RDONLY | O_BINARY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (fd < 0 && errno != ENOENT) {
         rtc_store_error("cannot open saved calendar");
     }
