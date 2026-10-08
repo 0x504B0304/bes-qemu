@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>

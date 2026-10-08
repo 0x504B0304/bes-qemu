@@ -49,6 +49,8 @@ if grep -q '^werror = true$' "$qemu_src/build/config-meson.cross"; then
     bes_meson=$(sed -n 's/^MESON=//p' "$qemu_src/build/config-host.mak")
     "$bes_meson" configure "$qemu_src/build" -Dwerror=false
 fi
-ninja -C "$qemu_src/build" qemu-system-arm
-"$qemu_src/build/qemu-system-arm" -M help | grep bes1503
-printf 'Built: %s/build/qemu-system-arm\n' "$qemu_src"
+bes_binary=qemu-system-arm
+case "$(uname -s)" in MINGW*|MSYS*) bes_binary=qemu-system-arm.exe ;; esac
+ninja -C "$qemu_src/build" "$bes_binary"
+"$qemu_src/build/$bes_binary" -M help | grep bes1503
+printf 'Built: %s/build/%s\n' "$qemu_src" "$bes_binary"
