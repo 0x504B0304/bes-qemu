@@ -11,7 +11,7 @@ def configuration():
             charger_bus=0, panel_te_gpio=0, battery_channel=0, thermistor_mask=2,
             thermistor_mv=900, battery_divider_uv_per_mv=3000,
             curve_uv=[4300000-i*10000 for i in range(101)], touch_model='inferred-report',
-            touch_bus=5, touch_address=32, touch_irq_gpio=1, touch_chip_id=1, panel_id=0,
+            touch_bus=5, touch_address=32, touch_irq_gpio=1, touch_chip_id=0xe623, panel_id=0,
             config_sha256=zero, nand_bus=1,
             nand=dict(page_size=2048, spare_size=64, pages_per_block=64, page_count=262144,
                       jedec_id=[0, 0, 0]), charger_probe_revision=7, touch_sleep_gesture=0,
