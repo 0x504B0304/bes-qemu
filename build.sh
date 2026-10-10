@@ -49,7 +49,17 @@ fi
 # QEMU 8.2's configure writes werror=true for Git checkouts even with
 # --disable-werror; Meson reconfigure reads that native-file default again.
 if grep -q '^werror = true$' "$qemu_src/build/config-meson.cross"; then
-    sed -i 's/^werror = true$/werror = false/' "$qemu_src/build/config-meson.cross"
+    python3 - "$qemu_src/build/config-meson.cross" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding='utf-8')
+updated = text.replace('werror = true', 'werror = false')
+if updated == text:
+    raise SystemExit('expected werror setting was not found')
+path.write_text(updated, encoding='utf-8')
+PY
     bes_meson=$(sed -n 's/^MESON=//p' "$qemu_src/build/config-host.mak")
     "$bes_meson" configure "$qemu_src/build" -Dwerror=false
 fi

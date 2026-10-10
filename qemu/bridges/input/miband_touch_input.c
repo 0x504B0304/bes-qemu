@@ -1,11 +1,13 @@
 /* Host QMP/VNC absolute input to a device report interface. */
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "sysemu/qtest.h"
 #include "miband_touch_input.h"
 
 static void touch_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt)
 {
     MiBandTouchInput *input = (MiBandTouchInput *)dev;
+    qemu_log_mask(LOG_UNIMP, "miband touch host event type=%d\n", evt->type);
     /* Host gestures must not speed up with the AP's icount clock. QTest
      * owns its event timeline explicitly through clock_step instead. VNC
      * and QMP can both use a NULL console, so src cannot distinguish them. */
@@ -40,6 +42,8 @@ static void touch_report(MiBandTouchInput *input, uint8_t event)
 static void touch_input_sync(DeviceState *dev)
 {
     MiBandTouchInput *input = (MiBandTouchInput *)dev;
+    qemu_log_mask(LOG_UNIMP, "miband touch host sync pressed=%u reported=%u x=%u y=%u\n",
+                  input->pressed, input->reported_pressed, input->x, input->y);
     if (input->pressed != input->reported_pressed) {
         if (!input->pressed && input->on_release) {
             input->on_release();
@@ -80,6 +84,8 @@ void miband_touch_input_init(MiBandTouchInput *input,
     input->reported_y = input->y;
     input->input = qemu_input_handler_register((DeviceState *)input, &touch_input_handler);
     qemu_input_handler_activate(input->input);
+    qemu_log_mask(LOG_UNIMP, "miband touch input registered width=%u height=%u\n",
+                  input->width, input->height);
 }
 
 void miband_touch_input_reset(MiBandTouchInput *input)
