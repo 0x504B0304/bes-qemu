@@ -4,11 +4,12 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import select
+import queue
 import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import zlib
 
@@ -18,14 +19,16 @@ class Machine:
         self.directory = directory
         self.store = directory / 'flash.journal'
         self.rtc = directory / 'flash.journal.rtc'
-        self.qmp = directory / 'qmp.sock'
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            self.qmp_port = reservation.getsockname()[1]
         self.command = [args.qemu, '-M',
             f'miband-best1502p,resource-image={args.resource},flash-state={self.store},'
             'nand-id=0xc8f4c8,nand-page-size=2048,nand-spare-size=64,'
             'nand-page-count=262144,nand-pages-per-block=64',
             '-kernel', args.ap, '-display', 'none', '-monitor', 'none',
             '-serial', 'none', '-serial', 'none', '-accel', 'qtest', '-qtest', 'stdio',
-            '-qmp', f'unix:{self.qmp},server=on,wait=off',
+            '-qmp', f'tcp:127.0.0.1:{self.qmp_port},server=on,wait=off',
             '-rtc', f'base=2026-09-30T23:59:58,clock={clock}']
         self.process = None
         self.error = (directory / 'stderr').open('w+')
@@ -33,14 +36,22 @@ class Machine:
     def start(self):
         self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=self.error, text=True)
+        self.lines = queue.Queue()
+        process, lines = self.process, self.lines
+        def read_output():
+            for line in process.stdout:
+                lines.put(line)
+            lines.put('')
+        self.reader = threading.Thread(target=read_output, daemon=True)
+        self.reader.start()
         self.cmd('readl 0x40009004')
+        record = self.rtc.read_bytes()
+        assert len(record) == 68 and struct.unpack_from('<I', record, 64)[0] == zlib.crc32(record[:64]), record.hex()
 
     def stop(self, graceful=False):
         if self.process and self.process.poll() is None:
             if graceful:
-                with socket.socket(socket.AF_UNIX) as sock:
-                    sock.settimeout(5)
-                    sock.connect(str(self.qmp))
+                with socket.create_connection(('127.0.0.1', self.qmp_port), timeout=5) as sock:
                     with sock.makefile('rwb', buffering=0) as stream:
                         assert 'QMP' in json.loads(stream.readline())
                         for command in ('qmp_capabilities', 'quit'):
@@ -54,17 +65,17 @@ class Machine:
                 self.process.kill()
             self.process.wait(timeout=10)
         if self.process:
+            self.reader.join(timeout=5)
             self.process.stdin.close()
             self.process.stdout.close()
 
     def cmd(self, line):
         self.process.stdin.write(line + '\n')
         self.process.stdin.flush()
-        assert select.select([self.process.stdout], [], [], 10)[0], 'QTest timeout'
-        reply = self.process.stdout.readline().strip()
+        reply = self.lines.get(timeout=10).strip()
         assert reply.startswith('OK'), (line, reply,
             self.rtc.read_bytes().hex() if self.rtc.exists() else None,
-            (self.directory / 'stderr').read_text()[-2000:])
+            (self.directory / 'stderr').read_text(encoding='utf-8', errors='replace')[-2000:])
         return int(reply.split()[1], 0) if len(reply.split()) > 1 else None
 
     def write(self, reg, value):
@@ -87,7 +98,9 @@ class Machine:
         self.write(0x0e, 1)
 
     def rejected(self, reason):
-        result = subprocess.run(self.command, input='', capture_output=True,
+        command = list(self.command)
+        command[command.index('-qmp') + 1] = 'tcp:127.0.0.1:0,server=on,wait=off'
+        result = subprocess.run(command, input='', capture_output=True,
                                 text=True, timeout=10)
         assert result.returncode != 0 and reason in result.stderr, result.stderr
 
@@ -100,6 +113,14 @@ def verify(args, clock):
             original_journal = hashlib.sha256(m.store.read_bytes()).hexdigest()
             m.load()
             assert m.calendar()[:3] == (0x28, 0xc629, 0x12)
+            # Exercise CRCs containing LF. Text-mode Windows checkpoints used
+            # to expand these bytes into CRLF, making the next boot fail.
+            for day in range(1, 32):
+                m.write(0x11, 0xc600 | (day // 10 * 16 + day % 10))
+                m.write(0x0e, 1)
+                record = m.rtc.read_bytes()
+                assert len(record) == 68 and struct.unpack_from('<I', record, 64)[0] == zlib.crc32(record[:64]), record.hex()
+            m.load()
             # LOAD must be durable immediately, without graceful shutdown.
             m.stop()
             if clock != 'vm':

@@ -33,6 +33,14 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC(QObject, peer_object_unref)
 #define RPMSG_NS_SIZE 40
 #define PEER_TICK_NS 1000000
 #define TOKEN_LIMIT 64
+#define FS_ENDPOINT_LIMIT 16
+#define REPLY_LIMIT 32
+#define RPMSGFS_HEADER_SIZE 16
+/* NuttX wire errno, independent of the host C runtime's errno numbering. */
+#define RPMSGFS_ENOSYS 38
+#define RPMSGFS_ENOENT 2
+#define RPMSGFS_STAT 20
+#define RPMSGFS_STAT_PATH_OFFSET 104
 
 #define CONFIG_NUMBERS(F) \
     F(mailbox_ap) F(mailbox_dsp) F(peer_config) F(peer_channels) \
@@ -51,7 +59,15 @@ typedef struct Hifi4Config {
     uint8_t *response;
     size_t request_size;
     size_t response_size;
+    uint32_t fs_address;
+    char fs_root[64];
 } Hifi4Config;
+
+typedef struct PeerReply {
+    uint32_t src, dst;
+    uint8_t *payload;
+    size_t size;
+} PeerReply;
 
 struct Best1700Hifi4Endpoint {
     AddressSpace *as;
@@ -74,6 +90,11 @@ struct Best1700Hifi4Endpoint {
     bool request_sent, service_ready, tx_busy;
     bool paused;
     const char *error;
+    uint32_t fs_clients[FS_ENDPOINT_LIMIT];
+    PeerReply replies[REPLY_LIMIT];
+    unsigned reply_head, reply_count;
+    uint64_t fs_rejected;
+    uint64_t fs_root_stats;
 };
 
 static void peer_tick(void *opaque);
@@ -344,6 +365,137 @@ static bool send_rpmsg(Best1700Hifi4Endpoint *s, uint32_t src, uint32_t dst,
     return true;
 }
 
+static void clear_replies(Best1700Hifi4Endpoint *s)
+{
+    for (unsigned i = 0; i < REPLY_LIMIT; i++) {
+        g_free(s->replies[i].payload);
+        memset(&s->replies[i], 0, sizeof(s->replies[i]));
+    }
+    s->reply_head = s->reply_count = 0;
+}
+
+static bool queue_reply(Best1700Hifi4Endpoint *s, uint32_t src, uint32_t dst,
+                        const uint8_t *payload, size_t size)
+{
+    PeerReply *reply;
+    if (s->reply_count == REPLY_LIMIT) {
+        fail(s, "RPMsg reply queue overflow");
+        return false;
+    }
+    reply = &s->replies[(s->reply_head + s->reply_count) % REPLY_LIMIT];
+    *reply = (PeerReply) { src, dst, g_memdup2(payload, size), size };
+    s->reply_count++;
+    return true;
+}
+
+static void send_replies(Best1700Hifi4Endpoint *s)
+{
+    while (s->reply_count && !s->error) {
+        PeerReply *reply = &s->replies[s->reply_head];
+        if (!send_rpmsg(s, reply->src, reply->dst, reply->payload, reply->size)) {
+            return; /* Retain the reply until the AP supplies an RX buffer. */
+        }
+        g_free(reply->payload);
+        memset(reply, 0, sizeof(*reply));
+        s->reply_head = (s->reply_head + 1) % REPLY_LIMIT;
+        s->reply_count--;
+    }
+}
+
+/* Optional explicit unavailable or empty filesystem peer. It binds the
+ * client's NS announcement and replies through the normal rings. Empty mode
+ * has exactly one configured directory and no files. No guest cookie is ever
+ * dereferenced by the host.
+ * Protocol: Apache NuttX fs/rpmsgfs/rpmsgfs.h, 16-byte LE header and NS prefix.
+ */
+static bool receive_fs(Best1700Hifi4Endpoint *s, uint32_t src, uint32_t dst,
+                       const uint8_t *payload, size_t size)
+{
+    unsigned slot;
+    if (!s->cfg.fs_address || src < 1024 || src >= 0xffffff00u) {
+        return false;
+    }
+    for (slot = 0; slot < FS_ENDPOINT_LIMIT; slot++) {
+        if (s->fs_clients[slot] == src) {
+            break;
+        }
+    }
+    if (dst == RPMSG_NS_ADDRESS && size == RPMSG_NS_SIZE &&
+        !memcmp(payload, "rpmsgfs-", 8) && payload[8] &&
+        memchr(payload, 0, 32) && ldl_le_p(payload + 32) == src) {
+        uint32_t flag = ldl_le_p(payload + 36);
+        if (flag == 1) {
+            if (slot < FS_ENDPOINT_LIMIT) {
+                s->fs_clients[slot] = 0;
+            }
+            return true;
+        }
+        if (flag != 0) {
+            return false;
+        }
+        if (slot == FS_ENDPOINT_LIMIT) {
+            for (slot = 0; slot < FS_ENDPOINT_LIMIT; slot++) {
+                if (!s->fs_clients[slot]) {
+                    break;
+                }
+            }
+        }
+        if (slot == FS_ENDPOINT_LIMIT) {
+            fail(s, "RPMsgFS endpoint limit exceeded");
+        } else {
+            uint8_t ack[RPMSG_NS_SIZE];
+            memcpy(ack, payload, sizeof(ack));
+            stl_le_p(ack + 32, s->cfg.fs_address);
+            stl_le_p(ack + 36, 2); /* NS CREATE_ACK binds the remote address. */
+            if (queue_reply(s, s->cfg.fs_address, RPMSG_NS_ADDRESS,
+                            ack, sizeof(ack))) {
+                s->fs_clients[slot] = src;
+            }
+        }
+        return true;
+    }
+    if (dst == s->cfg.fs_address && slot < FS_ENDPOINT_LIMIT &&
+        size >= RPMSGFS_HEADER_SIZE && size + RPMSG_HEADER_SIZE <= s->cfg.buffer_size &&
+        ldl_le_p(payload) >= 1 && ldl_le_p(payload) <= 26 &&
+        ldq_le_p(payload + 8)) {
+        g_autofree uint8_t *reply = g_memdup2(payload, size);
+        bool root_stat = false;
+        if (s->cfg.fs_root[0] && ldl_le_p(payload) == RPMSGFS_STAT &&
+            size > RPMSGFS_STAT_PATH_OFFSET) {
+            const uint8_t *path = payload + RPMSGFS_STAT_PATH_OFFSET;
+            const uint8_t *end = memchr(path, 0, size - RPMSGFS_STAT_PATH_OFFSET);
+            if (end) {
+                size_t len = end - path;
+                while (len > 1 && path[len - 1] == '/') {
+                    len--;
+                }
+                root_stat = len == strlen(s->cfg.fs_root) &&
+                            !memcmp(path, s->cfg.fs_root, len);
+            }
+        }
+        if (root_stat) {
+            memset(reply + RPMSGFS_HEADER_SIZE, 0,
+                   RPMSGFS_STAT_PATH_OFFSET - RPMSGFS_HEADER_SIZE);
+            stl_le_p(reply + 20, 0040000 | 0555); /* Wire S_IFDIR, read-only. */
+            stw_le_p(reply + 102, 2); /* Wire st_nlink. */
+            stl_le_p(reply + 4, 0);
+        } else {
+            /* Preserve command/cookie/layout. No file handles or contents. */
+            stl_le_p(reply + 4, (uint32_t)-(s->cfg.fs_root[0] ?
+                                         RPMSGFS_ENOENT : RPMSGFS_ENOSYS));
+        }
+        if (queue_reply(s, s->cfg.fs_address, src, reply, size)) {
+            if (root_stat) {
+                s->fs_root_stats++;
+            } else {
+                s->fs_rejected++;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 static void receive_rpmsg(Best1700Hifi4Endpoint *s)
 {
     for (unsigned i = 0; i < s->cfg.vring_num && !s->error; i++) {
@@ -367,7 +519,9 @@ static void receive_rpmsg(Best1700Hifi4Endpoint *s)
             fail(s, "guest RPMsg payload exceeds descriptor");
             break;
         }
-        if (dst == RPMSG_NS_ADDRESS && size == RPMSG_NS_SIZE &&
+        if (receive_fs(s, src, dst, payload, size)) {
+            /* Only the explicitly configured unavailable service is bound. */
+        } else if (dst == RPMSG_NS_ADDRESS && size == RPMSG_NS_SIZE &&
             !memcmp(payload, s->cfg.service_name, sizeof(s->cfg.service_name))) {
             uint32_t flag = ldl_le_p(payload + 36);
             if (flag == 2 && s->ns_sent && src >= 1024 &&
@@ -474,6 +628,7 @@ static void peer_tick(void *opaque)
     if ((status[0] & 4) && ring1 && status[1] == 2) {
         s->transport_ready = true;
         receive_rpmsg(s);
+        send_replies(s);
         if (!s->ns_sent && !s->error) {
             uint8_t ns[RPMSG_NS_SIZE] = { 0 };
             memcpy(ns, s->cfg.service_name, sizeof(s->cfg.service_name));
@@ -625,6 +780,32 @@ static bool load_profile(Best1700Hifi4Endpoint *s, const char *profile,
     numeric_fields++;
     CONFIG_NUMBERS(LOAD_FIELD)
 #undef LOAD_FIELD
+    if (qdict_haskey(dict, "rpmsgfs")) {
+        QDict *fs = qobject_to(QDict, qdict_get(dict, "rpmsgfs"));
+        const char *mode = fs ? qdict_get_try_str(fs, "mode") : NULL;
+        const char *dir = fs ? qdict_get_try_str(fs, "root") : NULL;
+        bool empty = mode && !strcmp(mode, "empty");
+        if (!fs || !mode || (!empty && strcmp(mode, "unavailable")) ||
+            qdict_size(fs) != (empty ? 3 : 2) ||
+            (empty && (!dir || dir[0] != '/' || strlen(dir) >= sizeof(c->fs_root) ||
+                       strspn(dir, "/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") != strlen(dir) ||
+                       (strlen(dir) > 1 && dir[strlen(dir) - 1] == '/') ||
+                       strstr(dir, "//") || strstr(dir, "/../") ||
+                       g_str_has_suffix(dir, "/..") || strstr(dir, "/./") ||
+                       g_str_has_suffix(dir, "/."))) ||
+            !uint_field(fs, "service_address", &c->fs_address, errp) ||
+            c->fs_address < 1024 || c->fs_address >= 0xffffff00u ||
+            c->fs_address == c->service_address) {
+            if (!errp || !*errp) {
+                error_setg(errp, "invalid RPMsgFS endpoint");
+            }
+            return false;
+        }
+        if (empty) {
+            g_strlcpy(c->fs_root, dir, sizeof(c->fs_root));
+        }
+        numeric_fields++;
+    }
     if (qdict_size(dict) != numeric_fields + 5 ||
         !uint_field(memory, "dtcm_base", &dtcm_base, errp) ||
         !uint_field(memory, "dtcm_size", &dtcm_size, errp) ||
@@ -799,6 +980,8 @@ void best1700_hifi4_reset(Best1700Hifi4Endpoint *s)
     s->token_head = s->token_count = 0;
     s->next_avail[0] = s->next_avail[1] = 0;
     s->remote_service = 0;
+    memset(s->fs_clients, 0, sizeof(s->fs_clients));
+    clear_replies(s);
     s->resets++;
     write32(s, s->cfg.mailbox_dsp, 0);
     write32(s, s->cfg.peer_channels + 4, 0);
@@ -831,6 +1014,7 @@ void best1700_hifi4_free(Best1700Hifi4Endpoint *s)
     g_free(s->resource_template);
     g_free(s->cfg.request);
     g_free(s->cfg.response);
+    clear_replies(s);
     g_free(s);
 }
 
@@ -885,6 +1069,17 @@ char *best1700_hifi4_status_json(const Best1700Hifi4Endpoint *s)
         qdict_put_int(status, "rpmsg_rx", s->rpmsg_rx);
         qdict_put_int(status, "resets", s->resets);
         qdict_put_int(status, "unsupported", s->unsupported);
+        if (s->cfg.fs_address) {
+            unsigned count = 0;
+            for (unsigned i = 0; i < FS_ENDPOINT_LIMIT; i++) {
+                count += s->fs_clients[i] != 0;
+            }
+            qdict_put_str(status, "filesystem_mode", s->cfg.fs_root[0] ? "empty" : "unavailable");
+            qdict_put_int(status, "filesystem_bound", count);
+            qdict_put_int(status, "filesystem_rejected", s->fs_rejected);
+            qdict_put_int(status, "filesystem_root_stats", s->fs_root_stats);
+            qdict_put_int(status, "pending_replies", s->reply_count);
+        }
         if (s->error) {
             qdict_put_str(status, "error", s->error);
         }

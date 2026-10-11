@@ -88,7 +88,9 @@ static void rtc_save(Best1502pIspi *ispi)
     stl_le_p(record + 60, rtc_clock);
     stl_le_p(record + 64, crc32(0, record, 64));
     temporary = g_strconcat(ispi->rtc_state_path, ".XXXXXX", NULL);
-    fd = g_mkstemp_full(temporary, O_RDWR | O_CLOEXEC, 0600);
+    /* The checkpoint contains arbitrary binary bytes, including CRC bytes.
+     * Windows text-mode writes expand LF and corrupt the fixed-size record. */
+    fd = g_mkstemp_full(temporary, O_RDWR | O_BINARY | O_CLOEXEC, 0600);
     if (fd < 0) {
         rtc_store_error("cannot create checkpoint");
     }
@@ -102,8 +104,17 @@ static void rtc_save(Best1502pIspi *ispi)
         }
         written += count;
     }
-    if (bes_data_sync(fd) || close(fd) || bes_replace(temporary, ispi->rtc_state_path)) {
-        rtc_store_error("checkpoint commit failed");
+    if (bes_data_sync(fd)) {
+        rtc_store_error("checkpoint data sync failed");
+    }
+    if (close(fd)) {
+        rtc_store_error("checkpoint close failed");
+    }
+    if (bes_replace(temporary, ispi->rtc_state_path)) {
+#ifdef _WIN32
+        error_report("best1502p RTC checkpoint replace: Win32=%lu", GetLastError());
+#endif
+        rtc_store_error("checkpoint replace failed");
     }
     parent = g_path_get_dirname(ispi->rtc_state_path);
     if (bes_dir_sync(parent)) {

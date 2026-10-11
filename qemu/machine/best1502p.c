@@ -27,6 +27,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/reset.h"
 #include "best1502p_nor.h"
 #include "best1502p_timer.h"
 #include "best1502p_ispi.h"
@@ -46,6 +47,7 @@
 #include "miband_zinitix.h"
 #include "miband_touch_input.h"
 #include "miband_binding_ui.h"
+#include "miband_charger.h"
 
 #define BEST1502P_XIP_BASE       0x0c000000u
 #define BEST1502P_NC_BASE        0x28000000u
@@ -199,6 +201,9 @@ struct Best1502pMachineState {
     uint32_t nand_id, nand_page_size, nand_spare_size;
     uint32_t nand_page_count, nand_pages_per_block;
     MiBandI2c touch_i2c[MIBAND_I2C_COUNT];
+    MiBandCharger charger;
+    bool charger_model;
+    uint32_t charger_i2c_bus, charger_probe_revision;
     MiBandZinitix touch;
     MiBandTouchInput touch_input;
     uint32_t touch_chip_id, touch_i2c_bus, touch_address, touch_irq_pin;
@@ -420,6 +425,11 @@ static void best1502p_set_resource(Object *obj, const char *value, Error **errp)
     s->resource_image = g_strdup(value);
 }
 
+static void best1502p_charger_reset(void *opaque)
+{
+    miband_charger_reset(opaque);
+}
+
 static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysmem)
 {
     if (!s->display_width && !s->display_height) {
@@ -478,13 +488,26 @@ static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysme
     sysbus_realize(SYS_BUS_DEVICE(&s->dsi), &error_fatal);
     memory_region_add_subregion_overlap(sysmem, 0x40230000,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dsi), 0), 4);
+    if (s->touch_chip_id || s->charger_model) {
+        miband_i2c_init(s->touch_i2c);
+    }
+    if (s->charger_model) {
+        if (s->charger_i2c_bus >= MIBAND_I2C_COUNT ||
+            !s->charger_probe_revision || s->charger_probe_revision > UINT8_MAX) {
+            error_report("charger requires a valid I2C bus and probe revision");
+            exit(1);
+        }
+        miband_charger_init(&s->charger, true, 75, false,
+                            s->charger_probe_revision);
+        s->touch_i2c[s->charger_i2c_bus].charger = &s->charger;
+        qemu_register_reset(best1502p_charger_reset, &s->charger);
+    }
     if (s->touch_chip_id) {
         if (s->touch_chip_id > UINT16_MAX || s->touch_i2c_bus >= MIBAND_I2C_COUNT ||
             !s->touch_address || s->touch_address > 0x7f || s->touch_irq_pin >= 96) {
             error_report("reference touch requires explicit chip-id, I2C bus/address and GPIO pin");
             exit(1);
         }
-        miband_i2c_init(s->touch_i2c);
         miband_zinitix_init(&s->touch, s->touch_chip_id, best1502p_touch_irq, s);
         if (s->touch_sleep_gesture > 1) {
             error_report("touch-sleep-gesture must be 0 (AF protocol) or 1 (command5 double tap)");
@@ -508,7 +531,7 @@ static uint64_t best1502p_mmio_read(void *opaque, hwaddr offset,
     uint32_t value = index < ARRAY_SIZE(mmio->words) ? mmio->words[index] : 0;
     uint64_t gpio_value;
 
-    if (mmio->machine->touch_chip_id &&
+    if ((mmio->machine->touch_chip_id || mmio->machine->charger_model) &&
         miband_i2c_read(mmio->machine->touch_i2c, mmio->base + offset,
                         size, &gpio_value)) {
         return gpio_value;
@@ -553,7 +576,7 @@ static void best1502p_mmio_write(void *opaque, hwaddr offset,
     Best1502pMmio *mmio = opaque;
     uint32_t index = offset >> 2;
 
-    if (mmio->machine->touch_chip_id &&
+    if ((mmio->machine->touch_chip_id || mmio->machine->charger_model) &&
         miband_i2c_write(mmio->machine->touch_i2c, mmio->base + offset,
                          size, value)) {
         return;
@@ -814,6 +837,62 @@ static void best1502p_set_flash_offset(Object *obj, Visitor *v,
     s->flash_offset = value;
 }
 
+static void best1502p_get_charger_state(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    int64_t level = s->charger.level;
+    bool charging = s->charger.charging;
+
+    if (!s->initialized || !s->charger_model) {
+        error_setg(errp, "charger model is unavailable");
+        return;
+    }
+    if (!visit_start_struct(v, name, NULL, 0, errp)) {
+        return;
+    }
+    if (visit_type_int(v, "level", &level, errp) &&
+        visit_type_bool(v, "charging", &charging, errp)) {
+        visit_check_struct(v, errp);
+    }
+    visit_end_struct(v, NULL);
+}
+
+static void best1502p_set_charger_state(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    int64_t level;
+    bool charging;
+    bool valid;
+
+    if (!s->initialized || !s->charger_model) {
+        error_setg(errp, "charger model is unavailable");
+        return;
+    }
+    if (!visit_start_struct(v, name, NULL, 0, errp)) {
+        return;
+    }
+    valid = visit_type_int(v, "level", &level, errp) &&
+            visit_type_bool(v, "charging", &charging, errp) &&
+            visit_check_struct(v, errp);
+    visit_end_struct(v, NULL);
+    if (!valid) {
+        return;
+    }
+    if (level < 0 || level > 100) {
+        error_setg(errp, "charger level must be an integer between 0 and 100");
+        return;
+    }
+    if (level != s->charger.level) {
+        error_setg(errp, "battery percentage is unavailable: the guest fuel gauge is not connected to a modeled ADC source");
+        return;
+    }
+    miband_charger_apply(&s->charger, level, charging);
+}
+
 static char *best1502p_get_firmware(Object *obj, Error **errp)
 {
     return g_strdup(BEST1502P_MACHINE(obj)->firmware_profile);
@@ -841,6 +920,21 @@ static void best1502p_set_skip_binding(Object *obj, bool value, Error **errp)
         error_setg(errp, "diag-skip-binding is startup-only"); return;
     }
     s->diag_skip_binding = value;
+}
+
+static bool best1502p_get_charger_model(Object *obj, Error **errp)
+{
+    return BEST1502P_MACHINE(obj)->charger_model;
+}
+
+static void best1502p_set_charger_model(Object *obj, bool value, Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "charger-model is startup-only");
+        return;
+    }
+    s->charger_model = value;
 }
 
 static void best1502p_init(MachineState *machine)
@@ -1142,6 +1236,12 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
     object_class_property_add(oc, "flash-offset", "uint32",
                               best1502p_get_flash_offset,
                               best1502p_set_flash_offset, NULL, NULL);
+    object_class_property_add_bool(oc, "charger-model",
+                                   best1502p_get_charger_model,
+                                   best1502p_set_charger_model);
+    object_class_property_add(oc, "charger-state", "MiBandChargerState",
+                              best1502p_get_charger_state,
+                              best1502p_set_charger_state, NULL, NULL);
 }
 
 static void best1502p_instance_init(Object *obj)
@@ -1153,6 +1253,10 @@ static void best1502p_instance_init(Object *obj)
     s->boot_pc = BEST1502P_XIP_BASE + 0x000c0000u + 0x11;
     s->flash_offset = 0x000c0000u;
     s->display_te_pin = UINT32_MAX;
+    object_property_add_uint32_ptr(obj, "charger-i2c-bus", &s->charger_i2c_bus,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "charger-probe-revision",
+                                   &s->charger_probe_revision, OBJ_PROP_FLAG_READWRITE);
     for (unsigned ch = 0; ch < 8; ch++) {
         g_autofree char *name = g_strdup_printf("gpadc-raw%u", ch);
         s->gpadc_input[ch] = UINT32_MAX;

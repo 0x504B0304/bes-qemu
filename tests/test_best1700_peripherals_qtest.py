@@ -51,12 +51,21 @@ class QtestMachine:
         image.write_bytes(image_payload)
         self.serial_paths = [self.directory / f"uart{i}.bin" for i in range(3)]
         self.qmp_path = self.directory / "qmp.sock"
+        self.qmp_tcp = os.name == 'nt'
+        if self.qmp_tcp:
+            with socket.socket() as reservation:
+                reservation.bind(('127.0.0.1', 0))
+                self.qmp_endpoint = reservation.getsockname()
+            qmp_address = f'tcp:127.0.0.1:{self.qmp_endpoint[1]},server=on,wait=off'
+        else:
+            self.qmp_endpoint = str(self.qmp_path)
+            qmp_address = f'unix:{self.qmp_path},server=on,wait=off'
         self.qmp_socket = None
         self.qmp_stream = None
         command = [str(executable), "-M", "miband-best1700" + machine_options,
                    "-kernel", str(image), "-display", "none", "-monitor", "none",
                    "-accel", accel, "-qtest", "stdio", "-qmp",
-                   f"unix:{self.qmp_path},server=on,wait=off"]
+                   qmp_address]
         command += list(extra_args)
         for backend in (serial_backends if serial_backends is not None else
                         [f"file:{path}" for path in self.serial_paths]):
@@ -128,12 +137,13 @@ class QtestMachine:
 
     def qmp(self, execute, arguments=None):
         if self.qmp_stream is None:
-            self.qmp_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.qmp_socket = socket.socket(socket.AF_INET if self.qmp_tcp else socket.AF_UNIX,
+                                            socket.SOCK_STREAM)
             self.qmp_socket.settimeout(5)
             deadline = time.monotonic() + 5
             while True:
                 try:
-                    self.qmp_socket.connect(str(self.qmp_path))
+                    self.qmp_socket.connect(self.qmp_endpoint)
                     break
                 except (FileNotFoundError, ConnectionRefusedError):
                     if self.process.poll() is not None or time.monotonic() >= deadline:

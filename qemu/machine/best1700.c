@@ -72,6 +72,8 @@
 #include "best1700_dma.h"
 #include "best1700_m55_ipc.h"
 #include "miband_emmc.h"
+#include "cw221x.h"
+#include "sc89620.h"
 
 #define TYPE_MIBAND_BEST1700 MACHINE_TYPE_NAME("miband-best1700")
 OBJECT_DECLARE_SIMPLE_TYPE(Best1700MachineState, MIBAND_BEST1700)
@@ -425,8 +427,6 @@ struct Best1700MachineState {
     uint32_t display_frame;
     uint32_t lcdc_writes;
     uint32_t aon_timer;
-    int charger_level;
-    bool charger_charging;
 };
 
 /* Display frames come exclusively from the guest LCDC/panel path.  The
@@ -859,13 +859,39 @@ static const MemoryRegionOps best1700_lcdc_ops = {
     .valid.max_access_size = 4,
 };
 
+static bool best1700_battery_devices(Cw221xState **gauge,
+                                    Sc89620State **charger, Error **errp)
+{
+    bool ambiguous;
+    Object *fuel = object_resolve_path_type("", TYPE_CW221X, &ambiguous);
+    Object *supply = object_resolve_path_type("", TYPE_SC89620, &ambiguous);
+
+    /* The board owns device placement and IDs. Resolve only a unique pair of
+     * compatible devices, never a firmware or product-specific object path.
+     * This runs only on host environment requests, outside MMIO/I2C paths. */
+    if (!fuel || !supply) {
+        error_setg(errp, "battery requires one CW221X fuel gauge and one SC89620 charger");
+        return false;
+    }
+    *gauge = CW221X(fuel);
+    *charger = SC89620(supply);
+    return true;
+}
+
 static void best1700_get_charger_state(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
                                        Error **errp)
 {
-    Best1700MachineState *s = MIBAND_BEST1700(obj);
-    int64_t level = s->charger_level;
-    bool charging = s->charger_charging;
+    Cw221xState *gauge;
+    Sc89620State *charger;
+    int64_t level;
+    bool charging;
+
+    if (!best1700_battery_devices(&gauge, &charger, errp)) {
+        return;
+    }
+    level = gauge->capacity_pct;
+    charging = charger->online;
     if (!visit_start_struct(v, name, NULL, 0, errp)) {
         return;
     }
@@ -880,7 +906,8 @@ static void best1700_set_charger_state(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
                                        Error **errp)
 {
-    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    Cw221xState *gauge;
+    Sc89620State *charger;
     int64_t level;
     bool charging;
     bool valid;
@@ -898,8 +925,15 @@ static void best1700_set_charger_state(Object *obj, Visitor *v,
         error_setg(errp, "charger level must be an integer between 0 and 100");
         return;
     }
-    s->charger_level = level;
-    s->charger_charging = charging;
+    if (!best1700_battery_devices(&gauge, &charger, errp)) {
+        return;
+    }
+    /* BQL serializes the atomic environment update with guest I2C reads.
+     * Keep guest control/profile registers and all other measurements intact.
+     * The firmware samples the real SOC and VBUS/charge-state registers; no
+     * guest battery cache, event or return value is changed here. */
+    gauge->capacity_pct = level;
+    charger->online = charging;
 }
 
 static uint64_t best1700_mmio_read(void *opaque, hwaddr addr, unsigned size)
@@ -3249,8 +3283,6 @@ static void best1700_init(MachineState *machine)
     miband_panel_connect_display(s->panel, s,
                                  best1700_panel_present);
     miband_panel_connect_te(s->panel, s, best1700_panel_te);
-    s->charger_level = 80;
-    s->charger_charging = false;
     for (unsigned i = 0; i < G_N_ELEMENTS(s->channels); i++) {
         s->channels[i].shared_base = s->shared_base + i * 0x10000;
         s->channels[i].doorbell = s->doorbell_base + i * 4;

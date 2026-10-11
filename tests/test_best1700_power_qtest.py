@@ -124,6 +124,26 @@ class SystemPowerQtest(I2cTestCase):
         # No exact CW221X identity has been established from this firmware.
         self.assertEqual(self.read_registers(GAUGE, 0), b'\xff')
 
+    def test_host_battery_update_reaches_i2c_and_preserves_guest_control(self):
+        self.activate_gauge()
+        self.write_registers(CHARGER, 0x16, [0x20])
+        q = self.machine
+        self.assertEqual(q.qmp('qom-get', {'path': '/machine', 'property': 'charger-state'}),
+                         {'level': 73, 'charging': True})
+        for level, online in ((25, False), (86, True), (100, False)):
+            value = {'level': level, 'charging': online}
+            self.assertEqual(q.qmp('qom-set', {'path': '/machine',
+                'property': 'charger-state', 'value': value}), {})
+            self.assertEqual(int.from_bytes(self.read_registers(GAUGE, 4, 2), 'big') // 256, level)
+            self.assertEqual(self.read_registers(CHARGER, 0x1e)[0], 0x48 if online else 0)
+            self.assertEqual(self.read_registers(CHARGER, 0x16), b'\x20')
+            self.assertEqual(self.read_registers(GAUGE, 0xa7), b'\x0c')
+        with self.assertRaises(RuntimeError):
+            q.qmp('qom-set', {'path': '/machine', 'property': 'charger-state',
+                              'value': {'level': 101, 'charging': True}})
+        self.assertEqual(q.qmp('qom-get', {'path': '/machine', 'property': 'charger-state'}),
+                         {'level': 100, 'charging': False})
+
     def test_slave_selection_and_reset_preserve_board_battery_environment(self):
         self.activate_gauge()
         q = self.machine

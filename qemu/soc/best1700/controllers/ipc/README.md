@@ -59,6 +59,29 @@ exercise IPC interrupts, actual split-ring messages, service negotiation,
 error handling, pause and reset. Original firmware boot is a separate
 acceptance check; a capability handshake does not establish PCM support.
 
+An optional `audio_endpoint.rpmsgfs` object can explicitly declare
+`{"mode":"unavailable","service_address":1025}` (use a distinct non-reserved
+address). This binds client `rpmsgfs-*` name-service announcements and responds
+to filesystem requests with the NuttX wire error `-ENOSYS`. It provides no
+files, metadata or successful operations. Requests and replies use the normal
+virtqueues and interrupts; command, layout and opaque cookie are retained.
+Pending replies wait for guest RX buffers in a bounded queue. Reset clears
+bindings and pending replies. Other services still receive no invented replies.
+Alternatively, `{"mode":"empty","root":"/proc","service_address":1025}`
+declares a single, empty, read-only virtual directory. STAT of exactly that
+configured root (with an optional trailing slash) returns directory mode
+`0555` and two links using the NuttX wire stat layout. Other paths and all
+other operations return `-ENOENT`; no file contents or handles are supplied.
+The root must be an absolute canonical ASCII path and is bounded in length.
+This is an explicitly configured limited filesystem peer, not execution of
+the remote processor's filesystem or diagnostic programs.
+QMP reports `filesystem_mode`, bound clients and rejected request counts
+and successful root stats separately from the PCM handshake's `ready` field.
+Protocol layout is documented
+by [NuttX RPMsgFS](https://github.com/apache/nuttx/blob/master/fs/rpmsgfs/rpmsgfs.h).
+The synthetic public qtests also cover error propagation, RX exhaustion,
+unknown clients, unbind and reset without any commercial firmware input.
+
 ## SYS/BTH interrupt controller
 
 `best1700_sys_bth_ipc.c` models the two CMU banks and sixteen interrupt

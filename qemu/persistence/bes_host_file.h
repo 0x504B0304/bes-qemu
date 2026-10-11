@@ -35,11 +35,29 @@ static inline int bes_replace(const char *from, const char *to)
 {
     gunichar2 *wide_from = g_utf8_to_utf16(from, -1, NULL, NULL, NULL);
     gunichar2 *wide_to = g_utf8_to_utf16(to, -1, NULL, NULL, NULL);
-    BOOL ok = wide_from && wide_to && MoveFileExW((WCHAR *)wide_from,
-        (WCHAR *)wide_to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    BOOL ok = FALSE;
+    DWORD error = ERROR_INVALID_NAME;
+    if (wide_from && wide_to) {
+        /* A reader without FILE_SHARE_DELETE can temporarily block atomic
+         * replacement on Windows (also reported as ACCESS_DENIED). Keep the
+         * old snapshot intact and bound the retry; never truncate in place. */
+        for (unsigned attempt = 0; attempt < 26; attempt++) {
+            ok = MoveFileExW((WCHAR *)wide_from, (WCHAR *)wide_to,
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            error = ok ? ERROR_SUCCESS : GetLastError();
+            if (ok || (error != ERROR_SHARING_VIOLATION &&
+                       error != ERROR_ACCESS_DENIED) || attempt == 25) {
+                break;
+            }
+            Sleep(10);
+        }
+    }
     g_free(wide_from); g_free(wide_to);
     if (ok) return 0;
-    errno = EIO; return -1;
+    errno = error == ERROR_SHARING_VIOLATION ? EBUSY :
+            error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+    SetLastError(error);
+    return -1;
 }
 #else
 #include <sys/file.h>
