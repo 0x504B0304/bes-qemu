@@ -21,7 +21,7 @@ struct Cst9217State {
     uint32_t irq_pin, reset_pin, width, height;
     uint32_t tap_duration_ms, tap_gap_ms, tap_slop;
     bool host_input, reading_report, reset_asserted, wake_pending;
-    bool reset_contact;
+    bool reset_contact, wear, wrist;
     bool tap_down, tap_valid, first_tap, second_tap;
     int64_t tap_started, tap_released;
     uint16_t tap_x, tap_y, first_x, first_y;
@@ -181,6 +181,12 @@ static void cst9217_command(Cst9217State *s)
     s->rx_count = 0;
     if (s->tx[0] == 0xd1) {
         s->mode = s->tx[1];
+        /* Wear detection and wrist-turn toggles are reported by D048. */
+        if (s->mode >= 0x23 && s->mode <= 0x24) {
+            s->wear = s->mode == 0x23;
+        } else if (s->mode >= 0x25 && s->mode <= 0x26) {
+            s->wrist = s->mode == 0x25;
+        }
         if (s->mode == 4 || s->mode == 5) {
             cst9217_clear_reports(s);
         } else {
@@ -256,6 +262,11 @@ static uint8_t cst9217_recv(I2CSlave *dev)
         }
         break;
     case 0x0002: value = (uint32_t)s->mode << 8; break;
+    case 0xd048:
+        /* ESD watchdog: 0x20 while the controller firmware runs, then the
+         * wrist-turn (bit 1) and wear-detection (bit 0) enables. */
+        value = 0x20 | (uint32_t)((s->wrist ? 2 : 0) | (s->wear ? 1 : 0)) << 8;
+        break;
     case 0xd224: value = 0xcaca9217; break;
     case 0xd220: value = 1; break;
     case 0xd204: value = 0x92170000; break;
@@ -286,6 +297,7 @@ static void cst9217_reset(DeviceState *dev)
     s->tap_x = s->tap_y = s->first_x = s->first_y = 0;
     s->reset_contact = false;
     s->reading_report = false;
+    s->wear = s->wrist = false;
     miband_touch_input_reset(&s->input);
     qemu_set_irq(s->irq, 1);
 }

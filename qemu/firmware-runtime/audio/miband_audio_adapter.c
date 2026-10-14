@@ -8,6 +8,7 @@
 #include "hw/loader.h"
 #include "miband_audio_adapter.h"
 #include "miband_binding_ui.h"
+#include "miband_binding_auth.h"
 
 static bool digest_matches(const uint8_t *bytes, const char *digest)
 {
@@ -21,8 +22,9 @@ static bool digest_matches(const uint8_t *bytes, const char *digest)
 
 void miband_audio_adapter_install(MiBandAudioAdapter *a, MiBandAudio *audio,
                                   MemoryRegion *sysmem, const char *ap,
-                                  const char *shim, const char *firmware_id,
-                                  bool skip_binding)
+                                  const char *shim, const char *shim_hex,
+                                  const char *firmware_id,
+                                  bool skip_binding, bool bypass_binding_auth)
 {
     g_autofree char *image = NULL, *code = NULL;
     gsize image_size = 0, code_size = 0;
@@ -33,8 +35,27 @@ void miband_audio_adapter_install(MiBandAudioAdapter *a, MiBandAudio *audio,
     if (!profile) {
         error_report("audio adapter: no profile for %s", firmware_id); exit(1);
     }
-    if (!g_file_get_contents(ap, &image, &image_size, NULL) ||
-        !shim || !g_file_get_contents(shim, &code, &code_size, NULL)) {
+    /* A private startup pipe can carry the version-bound helper without
+     * persisting a decrypted copy. The public file input remains available. */
+    if (shim_hex) {
+        size_t length = strlen(shim_hex);
+        if (shim || length < 80 || length > 131072 || (length & 1)) {
+            error_report("audio adapter: invalid or ambiguous inline shim"); exit(1);
+        }
+        code_size = length / 2;
+        code = g_malloc(code_size);
+        for (size_t i = 0; i < code_size; ++i) {
+            int hi = g_ascii_xdigit_value(shim_hex[i * 2]);
+            int lo = g_ascii_xdigit_value(shim_hex[i * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                error_report("audio adapter: invalid inline shim encoding"); exit(1);
+            }
+            code[i] = (hi << 4) | lo;
+        }
+    } else if (!shim || !g_file_get_contents(shim, &code, &code_size, NULL)) {
+        error_report("audio adapter: cannot read shim"); exit(1);
+    }
+    if (!g_file_get_contents(ap, &image, &image_size, NULL)) {
         error_report("audio adapter: cannot read AP/shim"); exit(1);
     }
     g_autofree char *hash = g_compute_checksum_for_data(G_CHECKSUM_SHA256, (guchar *)image, image_size);
@@ -50,7 +71,13 @@ void miband_audio_adapter_install(MiBandAudioAdapter *a, MiBandAudio *audio,
                      !digest_matches((const uint8_t *)code + 72, profile->config_sha256)))) {
         error_report("audio adapter: shim firmware/configuration binding mismatch"); exit(1);
     }
-    if (skip_binding) miband_binding_ui_patch(image, image_size, firmware_id);
+    if (bypass_binding_auth) {
+        miband_binding_auth_patch(image, image_size, firmware_id);
+        if (skip_binding)
+            miband_binding_ui_patch_after_auth(image, image_size, firmware_id);
+    } else if (skip_binding) {
+        miband_binding_ui_patch(image, image_size, firmware_id);
+    }
     for (unsigned i = 0; i < G_N_ELEMENTS(profile->hooks); ++i) {
         const MiBandAudioHook *hook = &profile->hooks[i];
         uint32_t target = ldl_le_p(code + hook->entry);

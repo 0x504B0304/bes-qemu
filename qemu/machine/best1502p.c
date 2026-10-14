@@ -204,6 +204,7 @@ struct Best1502pMachineState {
     MiBandCharger charger;
     bool charger_model;
     uint32_t charger_i2c_bus, charger_probe_revision;
+    uint32_t charger_device_id;
     MiBandZinitix touch;
     MiBandTouchInput touch_input;
     uint32_t touch_chip_id, touch_i2c_bus, touch_address, touch_irq_pin;
@@ -430,6 +431,17 @@ static void best1502p_charger_reset(void *opaque)
     miband_charger_reset(opaque);
 }
 
+static void best1502p_charger_environment(void *opaque, unsigned level,
+                                         bool charging, bool cable_changed)
+{
+    best1502p_ispi_charger_input(&BEST1502P_MACHINE(opaque)->ispi_state, charging);
+}
+
+static void best1502p_charger_irq_reset(void *opaque)
+{
+    best1502p_ispi_charger_reset(&BEST1502P_MACHINE(opaque)->ispi_state);
+}
+
 static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysmem)
 {
     if (!s->display_width && !s->display_height) {
@@ -498,7 +510,13 @@ static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysme
             exit(1);
         }
         miband_charger_init(&s->charger, true, 75, false,
-                            s->charger_probe_revision);
+                            s->charger_probe_revision, s->charger_device_id);
+        MiBandChargerSignals signals = {
+            .opaque = s,
+            .environment_changed = best1502p_charger_environment,
+            .reset_irq = best1502p_charger_irq_reset,
+        };
+        miband_charger_connect(&s->charger, &signals);
         s->touch_i2c[s->charger_i2c_bus].charger = &s->charger;
         qemu_register_reset(best1502p_charger_reset, &s->charger);
     }
@@ -775,6 +793,61 @@ static const MemoryRegionOps best1502p_memsc_ops = {
     .valid.max_access_size = 4,
 };
 
+static void best1502p_get_gpadc_input(Object *obj, Visitor *v, const char *name,
+                                     void *opaque, Error **errp)
+{
+    unsigned channel = (uintptr_t)opaque;
+    visit_type_uint32(v, name, &BEST1502P_MACHINE(obj)->gpadc_input[channel], errp);
+}
+
+static void best1502p_set_gpadc_input(Object *obj, Visitor *v, const char *name,
+                                     void *opaque, Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    unsigned channel = (uintptr_t)opaque;
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value > UINT16_MAX && value != UINT32_MAX) {
+        error_setg(errp, "%s must be 0..65535 or 4294967295 (disconnected)", name);
+        return;
+    }
+    if (s->initialized) {
+        best1502p_ispi_set_adc_input(&s->ispi_state, channel, value);
+    }
+    s->gpadc_input[channel] = value;
+}
+
+static void best1502p_get_charger_device_id(Object *obj, Visitor *v,
+                                           const char *name, void *opaque,
+                                           Error **errp)
+{
+    visit_type_uint32(v, name, &BEST1502P_MACHINE(obj)->charger_device_id, errp);
+}
+
+static void best1502p_set_charger_device_id(Object *obj, Visitor *v,
+                                           const char *name, void *opaque,
+                                           Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (s->initialized) {
+        error_setg(errp, "charger-device-id is startup-only");
+        return;
+    }
+    if (value > UINT8_MAX) {
+        error_setg(errp, "charger-device-id must fit in one byte");
+        return;
+    }
+    s->charger_device_id = value;
+}
+
 static void best1502p_get_vector(Object *obj, Visitor *v, const char *name,
                                  void *opaque, Error **errp)
 {
@@ -844,6 +917,7 @@ static void best1502p_get_charger_state(Object *obj, Visitor *v,
     Best1502pMachineState *s = BEST1502P_MACHINE(obj);
     int64_t level = s->charger.level;
     bool charging = s->charger.charging;
+    bool level_adjustable = false;
 
     if (!s->initialized || !s->charger_model) {
         error_setg(errp, "charger model is unavailable");
@@ -853,7 +927,8 @@ static void best1502p_get_charger_state(Object *obj, Visitor *v,
         return;
     }
     if (visit_type_int(v, "level", &level, errp) &&
-        visit_type_bool(v, "charging", &charging, errp)) {
+        visit_type_bool(v, "charging", &charging, errp) &&
+        visit_type_bool(v, "level-adjustable", &level_adjustable, errp)) {
         visit_check_struct(v, errp);
     }
     visit_end_struct(v, NULL);
@@ -1192,6 +1267,9 @@ static void best1502p_init(MachineState *machine)
     /* The AP selects AON channel 1 on IRQ 46. Other timer IRQ routes
      * remain unconnected until qualified. */
     s->timer1_state.channel[1].irq = qdev_get_gpio_in(armv7m, 46);
+    /* The unified PMU handler uses external interrupt 42. Charger insertion
+     * and removal are enabled/acknowledged through the ISPI register bus. */
+    best1502p_ispi_connect_pmu_irq(&s->ispi_state, qdev_get_gpio_in(armv7m, 42));
     best1502p_display_init(s, sysmem);
     best1502p_nand_init(s, sysmem);
     if (s->diag_skip_binding) {
@@ -1242,6 +1320,9 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
     object_class_property_add(oc, "charger-state", "MiBandChargerState",
                               best1502p_get_charger_state,
                               best1502p_set_charger_state, NULL, NULL);
+    object_class_property_add(oc, "charger-device-id", "uint32",
+                              best1502p_get_charger_device_id,
+                              best1502p_set_charger_device_id, NULL, NULL);
 }
 
 static void best1502p_instance_init(Object *obj)
@@ -1253,6 +1334,7 @@ static void best1502p_instance_init(Object *obj)
     s->boot_pc = BEST1502P_XIP_BASE + 0x000c0000u + 0x11;
     s->flash_offset = 0x000c0000u;
     s->display_te_pin = UINT32_MAX;
+    s->charger_device_id = 0x1e;
     object_property_add_uint32_ptr(obj, "charger-i2c-bus", &s->charger_i2c_bus,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "charger-probe-revision",
@@ -1260,7 +1342,8 @@ static void best1502p_instance_init(Object *obj)
     for (unsigned ch = 0; ch < 8; ch++) {
         g_autofree char *name = g_strdup_printf("gpadc-raw%u", ch);
         s->gpadc_input[ch] = UINT32_MAX;
-        object_property_add_uint32_ptr(obj, name, &s->gpadc_input[ch], OBJ_PROP_FLAG_READWRITE);
+        object_property_add(obj, name, "uint32", best1502p_get_gpadc_input,
+                             best1502p_set_gpadc_input, NULL, (void *)(uintptr_t)ch);
     }
     object_property_add_uint32_ptr(obj, "nand-id", &s->nand_id, OBJ_PROP_FLAG_READWRITE);
     s->touch_i2c_bus = s->touch_irq_pin = UINT32_MAX;

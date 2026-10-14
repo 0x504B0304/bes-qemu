@@ -52,6 +52,19 @@ class Cst9217Qtest(unittest.TestCase):
             {'type': 'btn', 'data': {'button': 'left', 'down': down}},
         ]})
 
+    def test_esd_watchdog_reports_running_and_wear_wrist_enables(self):
+        # Driver ESD check: byte 0 must read 0x20 or it retries and resets.
+        self.assertEqual(self.read('d048', 2), b'\x20\0')
+        self.write(bytes.fromhex('d123'))
+        self.write(bytes.fromhex('d125'))
+        self.assertEqual(self.read('d048', 2), b'\x20\x03')
+        self.write(bytes.fromhex('d124'))
+        self.assertEqual(self.read('d048', 2), b'\x20\x02')
+        self.write(bytes.fromhex('d109'))
+        self.assertEqual(self.read('d048', 2), b'\x20\x02')
+        self.write(bytes.fromhex('d126'))
+        self.assertEqual(self.read('d048', 2), b'\x20\0')
+
     def test_probe_modes_boot_identity_and_readonly_identity(self):
         self.assertEqual(self.read('d224', 4), bytes.fromhex('1792caca'))
         self.write(bytes.fromhex('d11e'))

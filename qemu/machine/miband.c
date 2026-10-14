@@ -139,7 +139,7 @@ struct MiBandMachineState {
     MiBandDma dma;
     MiBandAudio audio;
     MiBandAudioAdapter audio_adapter;
-    char *audio_mode, *audio_source, *audio_file, *audio_device, *audio_shim;
+    char *audio_mode, *audio_source, *audio_file, *audio_device, *audio_shim, *audio_shim_hex;
     bool diag_skip_binding;
     bool diag_bypass_binding_auth;
     bool audio_initialized;
@@ -650,7 +650,7 @@ static void miband_init(MachineState *machine)
     miband_bt_set_le_passkey(&s->bt, s->bt_le_passkey);
     miband_i2c_init(s->i2c);
     miband_charger_init(&s->charger, s->charger_model, 75, false,
-                         s->board->charger_probe_revision);
+                         s->board->charger_probe_revision, 0x1e);
     s->i2c[s->charger_i2c_bus].charger = &s->charger;
     s->i2c[5].probe_address = s->i2c5_probe_address;
     s->i2c[5].probe_chip_id = s->i2c5_probe_chip_id;
@@ -821,8 +821,8 @@ static void miband_init(MachineState *machine)
                                s->audio_file, s->audio_device, &error_fatal)) exit(1);
         s->audio_initialized = true;
         miband_audio_adapter_install(&s->audio_adapter, &s->audio, sysmem,
-                                     machine->kernel_filename, s->audio_shim, firmware->id,
-                                     s->diag_skip_binding);
+                                     machine->kernel_filename, s->audio_shim, s->audio_shim_hex, firmware->id,
+                                     s->diag_skip_binding, s->diag_bypass_binding_auth);
         armv7m_load_kernel(ARM_CPU(first_cpu), NULL, ap_base, AP_FLASH_SIZE - firmware->flash_offset);
     } else if (s->diag_skip_binding || s->diag_bypass_binding_auth) {
         miband_binding_ui_install(machine->kernel_filename, firmware->id,
@@ -848,6 +848,7 @@ AUDIO_STRING_PROPERTY(audio_source)
 AUDIO_STRING_PROPERTY(audio_file)
 AUDIO_STRING_PROPERTY(audio_device)
 AUDIO_STRING_PROPERTY(audio_shim)
+AUDIO_STRING_PROPERTY(audio_shim_hex)
 #undef AUDIO_STRING_PROPERTY
 
 static bool get_skip_binding(Object *obj, Error **errp)
@@ -1961,6 +1962,7 @@ static void miband_class_init(ObjectClass *oc, void *data)
     object_class_property_add_str(oc, "audio-file", get_audio_file, set_audio_file);
     object_class_property_add_str(oc, "audio-device", get_audio_device, set_audio_device);
     object_class_property_add_str(oc, "audio-shim", get_audio_shim, set_audio_shim);
+    object_class_property_add_str(oc, "audio-shim-hex", get_audio_shim_hex, set_audio_shim_hex);
     object_class_property_add_str(oc, "audio-stats", get_audio_stats, NULL);
     object_class_property_add_str(oc, "audio-profile-sha256", get_audio_profile_sha256, NULL);
     object_class_property_add_bool(oc, "diag-skip-binding", get_skip_binding, set_skip_binding);

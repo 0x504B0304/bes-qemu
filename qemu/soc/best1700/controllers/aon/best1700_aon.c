@@ -111,6 +111,13 @@ static void best1700_timer_write(Best1700AonTimer *timer, hwaddr address,
         best1700_timer_limit(timer);
         ptimer_set_count(timer->timer,
                          (uint64_t)(value & best1700_timer_mask(timer)) + 1);
+        /* An enabled counter restarts from the new value, including a
+         * one-shot halted at zero: tickless drivers rearm by writing Load
+         * only (SP804 TRM one-shot mode). */
+        if (timer->control & BEST1700_TIMER_ENABLE) {
+            ptimer_run(timer->timer,
+                       (timer->control & BEST1700_TIMER_ONESHOT) != 0);
+        }
         break;
     case BEST1700_TIMER_BGLOAD:
         timer->load = value;

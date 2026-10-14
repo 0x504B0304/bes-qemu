@@ -39,7 +39,8 @@ FAST_HZ = 6_000_000
 
 class QtestMachine:
     def __init__(self, executable, *, image_payload=None, machine_options="",
-                 accel="qtest", extra_args=(), serial_backends=None):
+                 accel="qtest", extra_args=(), serial_backends=None,
+                 machine_name="miband-best1700"):
         self.temp = tempfile.TemporaryDirectory(prefix="best1700-qtest-")
         self.directory = Path(self.temp.name)
         self.stderr_path = self.directory / "qemu.log"
@@ -62,7 +63,7 @@ class QtestMachine:
             qmp_address = f'unix:{self.qmp_path},server=on,wait=off'
         self.qmp_socket = None
         self.qmp_stream = None
-        command = [str(executable), "-M", "miband-best1700" + machine_options,
+        command = [str(executable), "-M", machine_name + machine_options,
                    "-kernel", str(image), "-display", "none", "-monitor", "none",
                    "-accel", accel, "-qtest", "stdio", "-qmp",
                    qmp_address]
@@ -498,6 +499,28 @@ class Best1700PeripheralsQtest(unittest.TestCase):
         self.assertEqual(q.read32(timer + 4), 0)
         self.assertEqual(q.read32(timer + 0x10), 0)
         q.step(100)
+        self.assertEqual(q.read32(timer + 0x10), 1)
+        self.assertTrue(q.irq(59))
+
+    def test_aon_oneshot_halted_at_zero_rearms_on_load_write(self):
+        q = self.machine
+        timer = AON_TIMER0 + 0x20
+        before = 82 * 1_000_000_000 // SLOW_HZ
+        deadline = (83 * 1_000_000_000 + SLOW_HZ - 1) // SLOW_HZ
+        q.write32(timer + 8, 2)
+        q.write32(timer + 0x0C, 1)
+        q.write32(timer, 82)
+        q.write32(timer + 8, 0xA3)
+        q.step(deadline)
+        self.assertTrue(q.irq(59))
+        q.write32(timer + 0x0C, 1)
+        q.step(deadline)
+        self.assertFalse(q.irq(59), "a halted one-shot must not repeat")
+        # Tickless drivers rearm an enabled one-shot by writing Load only.
+        q.write32(timer, 82)
+        q.step(before)
+        self.assertFalse(q.irq(59))
+        q.step(deadline - before)
         self.assertEqual(q.read32(timer + 0x10), 1)
         self.assertTrue(q.irq(59))
 

@@ -4,6 +4,7 @@
 #include "exec/memory.h"
 #include "qemu/timer.h"
 #include "qemu/notify.h"
+#include "hw/irq.h"
 
 #define BEST1502P_ISPI_BASE 0x40009000u
 #define BEST1502P_ISPI_SIZE 0x00000100u
@@ -11,8 +12,8 @@
 #define BEST1502P_ISPI_PAGE_COUNT 6
 
 /* The reference AP uses the BES ISPI register protocol for its on-die PMU.  The
- * register window is SoC IP; board-specific battery/charger behaviour is
- * intentionally left out of this first bring-up model. */
+ * register window is SoC IP. External analog inputs and cable presence are
+ * supplied by board wiring; charger edges use the unified PMU interrupt. */
 typedef struct Best1502pIspi {
     uint32_t regs[BEST1502P_ISPI_SIZE / sizeof(uint32_t)];
     uint16_t device_regs[BEST1502P_ISPI_CS_COUNT]
@@ -27,6 +28,8 @@ typedef struct Best1502pIspi {
     uint32_t adc_input[8];
     int64_t adc_deadline;
     uint16_t adc_pending;
+    qemu_irq pmu_irq;
+    bool charger_connected;
     /* Battery-backed calendar domain survives AP reset. */
     int64_t rtc_base_seconds;
     int64_t rtc_start_ns;
@@ -38,6 +41,12 @@ typedef struct Best1502pIspi {
 } Best1502pIspi;
 
 void best1502p_ispi_init(Best1502pIspi *ispi);
+void best1502p_ispi_connect_pmu_irq(Best1502pIspi *ispi, qemu_irq irq);
+void best1502p_ispi_charger_input(Best1502pIspi *ispi, bool connected);
+void best1502p_ispi_charger_reset(Best1502pIspi *ispi);
+/* Host analog input; affects future conversions, not already latched samples. */
+void best1502p_ispi_set_adc_input(Best1502pIspi *ispi, unsigned channel,
+                                 uint32_t value);
 /* Called only after the machine holds the flash journal's exclusive lock. */
 void best1502p_ispi_open_rtc(Best1502pIspi *ispi, const char *flash_path,
                            const uint8_t digest[32]);

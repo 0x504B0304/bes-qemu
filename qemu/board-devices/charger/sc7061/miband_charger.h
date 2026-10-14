@@ -19,6 +19,7 @@ typedef struct MiBandCharger {
     unsigned level;
     bool charging;
     uint8_t probe_revision;
+    uint8_t device_id;
     uint8_t registers[256];
     uint8_t pointer;
     bool expect_register;
@@ -31,7 +32,8 @@ typedef struct MiBandCharger {
 } MiBandCharger;
 
 void miband_charger_init(MiBandCharger *charger, bool enabled,
-                         unsigned level, bool charging, uint8_t probe_revision);
+                         unsigned level, bool charging, uint8_t probe_revision,
+                         uint8_t device_id);
 void miband_charger_connect(MiBandCharger *charger,
                              const MiBandChargerSignals *signals);
 bool miband_charger_apply(MiBandCharger *charger, unsigned level,

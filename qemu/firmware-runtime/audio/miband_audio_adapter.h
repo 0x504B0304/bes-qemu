@@ -24,8 +24,9 @@ typedef struct MiBandAudioAdapter {
 } MiBandAudioAdapter;
 void miband_audio_adapter_install(MiBandAudioAdapter *a, MiBandAudio *audio,
                                   MemoryRegion *sysmem, const char *ap,
-                                  const char *shim, const char *firmware_id,
-                                  bool skip_binding);
+                                  const char *shim, const char *shim_hex,
+                                  const char *firmware_id,
+                                  bool skip_binding, bool bypass_binding_auth);
 void miband_audio_adapter_reset(MiBandAudioAdapter *a);
 bool miband_audio_adapter_read(MiBandAudioAdapter *a, hwaddr address,
                               unsigned size, uint64_t *value);

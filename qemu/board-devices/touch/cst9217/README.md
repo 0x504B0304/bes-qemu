@@ -17,6 +17,10 @@ input state; unrealize unregisters the host handler.
 The primary driver of the qualified S5 image probes I2C1/0x5a and attaches
 GPIO86. The modeled `D1xx` mode commands, `0002` mode readback, `D220/D224`
 identity and `D1FC/D200/D204/D208/D21C` metadata satisfy its normal startup.
+The driver's ESD watchdog reads `D048`: byte 0 is `20` while the controller
+runs and byte 1 reports the wear-detection (bit 0) and wrist-turn (bit 1)
+enables set by modes `23/24` and `25/26`. Without it the driver logs
+`esd_check ... need retry: 0x0` continuously.
 Identity `9217`, module 1 and version/checksum zero are an explicit candidate
 scenario, not a readout of a physical controller. Boot probe `A002` and chip
 identity at bank 1/address 077c are limited responses. `D105` selects deep

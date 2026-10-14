@@ -24,6 +24,52 @@
 #define ISPI_PAGE_BASE 0xa000
 #define ISPI_PMU_CS 3
 
+#define PMU_CHARGER_ENABLE 0x05
+#define PMU_UNIFIED_ENABLE 0x40
+#define PMU_CHARGER_STATUS 0x5e
+#define PMU_AC_ON (1u << 2)
+#define PMU_CHARGER_IN (1u << 3)
+#define PMU_CHARGER_OUT (1u << 4)
+#define PMU_CHARGER_IRQS (PMU_CHARGER_IN | PMU_CHARGER_OUT)
+
+static void pmu_update_irq(Best1502pIspi *ispi)
+{
+    uint16_t *r = ispi->device_regs[ISPI_PMU_CS][0];
+    bool pending = ((r[PMU_CHARGER_STATUS] & PMU_CHARGER_IN) &&
+                    (r[PMU_CHARGER_ENABLE] & (1u << 11))) ||
+                   ((r[PMU_CHARGER_STATUS] & PMU_CHARGER_OUT) &&
+                    (r[PMU_CHARGER_ENABLE] & (1u << 12)));
+
+    if (ispi->pmu_irq) {
+        qemu_set_irq(ispi->pmu_irq,
+                     pending && (r[PMU_UNIFIED_ENABLE] & (1u << 12)));
+    }
+}
+
+void best1502p_ispi_connect_pmu_irq(Best1502pIspi *ispi, qemu_irq irq)
+{
+    ispi->pmu_irq = irq;
+    pmu_update_irq(ispi);
+}
+
+void best1502p_ispi_charger_input(Best1502pIspi *ispi, bool connected)
+{
+    uint16_t *status = &ispi->device_regs[ISPI_PMU_CS][0][PMU_CHARGER_STATUS];
+
+    if (ispi->charger_connected != connected) {
+        *status |= connected ? PMU_CHARGER_IN : PMU_CHARGER_OUT;
+    }
+    ispi->charger_connected = connected;
+    *status = (*status & ~PMU_AC_ON) | (connected ? PMU_AC_ON : 0);
+    pmu_update_irq(ispi);
+}
+
+void best1502p_ispi_charger_reset(Best1502pIspi *ispi)
+{
+    ispi->device_regs[ISPI_PMU_CS][0][PMU_CHARGER_STATUS] &= ~PMU_CHARGER_IRQS;
+    pmu_update_irq(ispi);
+}
+
 /* reference calendar_get/set use CS3 page1, BCD fields and LOAD bit0.
  * This is a polled calendar, not an alarm/IRQ implementation. */
 #define RTC_PAGE 1
@@ -288,11 +334,17 @@ static void best1502p_ispi_reset(void *opaque)
 {
     Best1502pIspi *ispi = opaque;
     uint32_t inputs[8];
+    qemu_irq irq = ispi->pmu_irq;
+    bool connected = ispi->charger_connected;
 
     memcpy(inputs, ispi->adc_input, sizeof(inputs));
     /* Everything from rtc_base_seconds onward belongs to the retained domain. */
     memset(ispi, 0, offsetof(Best1502pIspi, rtc_base_seconds));
     memcpy(ispi->adc_input, inputs, sizeof(inputs));
+    ispi->pmu_irq = irq;
+    ispi->charger_connected = connected;
+    ispi->device_regs[ISPI_PMU_CS][0][PMU_CHARGER_STATUS] = connected ? PMU_AC_ON : 0;
+    pmu_update_irq(ispi);
     ispi->device_regs[ISPI_PMU_CS][0][0] = 0xc0d0;
     ispi->device_regs[ISPI_PMU_CS][0][0x61] = 1;
 }
@@ -303,6 +355,16 @@ static bool ispi_page_value(uint16_t value)
 
     return value >= ISPI_PAGE_BASE && page < BEST1502P_ISPI_PAGE_COUNT &&
            (value & 0xf) == 0;
+}
+
+void best1502p_ispi_set_adc_input(Best1502pIspi *ispi, unsigned channel,
+                                 uint32_t value)
+{
+    assert(channel < ARRAY_SIZE(ispi->adc_input));
+    assert(value <= UINT16_MAX || value == UINT32_MAX);
+    /* Complete elapsed conversions with the old input before changing it. */
+    gpadc_update(ispi);
+    ispi->adc_input[channel] = value;
 }
 
 static unsigned ispi_page_index(const Best1502pIspi *ispi)
@@ -419,6 +481,12 @@ bool best1502p_ispi_write(Best1502pIspi *ispi, hwaddr offset,
         } else {
             if (ispi->chip_select == ISPI_PMU_CS && page == 0 && reg == 0x51) {
                 ispi->adc_pending &= ~data;
+            } else if (ispi->chip_select == ISPI_PMU_CS && page == 0 &&
+                       reg == PMU_CHARGER_STATUS) {
+                /* AC_ON is external input. The unified ISR acknowledges
+                 * insertion/removal by writing the observed status back. */
+                ispi->device_regs[ISPI_PMU_CS][0][reg] &= ~(data & PMU_CHARGER_IRQS);
+                pmu_update_irq(ispi);
             } else if (ispi->chip_select == ISPI_PMU_CS && page == RTC_PAGE &&
                        reg >= RTC_READ_TIME && reg <= RTC_READ_YEAR) {
                 /* The calendar is committed through LOAD, not readback. */
@@ -433,6 +501,10 @@ bool best1502p_ispi_write(Best1502pIspi *ispi, hwaddr offset,
             if (ispi->chip_select == ISPI_PMU_CS && page == 0 && reg == 0x4f) {
                 ispi->adc_deadline = (data & (1u << 5)) ?
                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 125000 : 0;
+            }
+            if (ispi->chip_select == ISPI_PMU_CS && page == 0 &&
+                (reg == PMU_CHARGER_ENABLE || reg == PMU_UNIFIED_ENABLE)) {
+                pmu_update_irq(ispi);
             }
         }
         ispi->rx_data = 0;

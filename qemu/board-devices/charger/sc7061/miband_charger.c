@@ -47,7 +47,7 @@ static void charger_refresh(MiBandCharger *charger)
 {
     charger->registers[SC7061_REG_PROBE] = charger->probe_revision;
     charger->registers[SC7061_REG_FAMILY] = 0;
-    charger->registers[SC7061_REG_ID] = 0x1e;
+    charger->registers[SC7061_REG_ID] = charger->device_id;
     charger_refresh_status(charger);
 }
 
@@ -68,13 +68,15 @@ void miband_charger_reset(MiBandCharger *charger)
 }
 
 void miband_charger_init(MiBandCharger *charger, bool enabled,
-                         unsigned level, bool charging, uint8_t probe_revision)
+                         unsigned level, bool charging, uint8_t probe_revision,
+                         uint8_t device_id)
 {
     memset(charger, 0, sizeof(*charger));
     charger->enabled = enabled;
     charger->level = MIN(level, 100);
     charger->charging = charging;
     charger->probe_revision = probe_revision;
+    charger->device_id = device_id;
     miband_charger_reset(charger);
     qemu_log_mask(LOG_UNIMP, "miband charger model=%s level=%u charging=%u\n",
                   enabled ? "SC7061-subset" : "off", charger->level,
