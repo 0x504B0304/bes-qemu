@@ -681,6 +681,15 @@ static bool gpu_source_content_supported(MiBandGpu *gpu, const uint8_t *source,
     return true;
 }
 
+/* A02 pen/tint and A27 border use ABGR8888. Rasterizer pixels, CLUT entries
+ * and the supported packed targets use canonical ARGB8888. Convert only
+ * register colors; swapping textures or scanout would corrupt correct images. */
+static inline uint32_t gpu_register_color(uint32_t abgr)
+{
+    return (abgr & 0xff00ff00u) | ((abgr & 0xffu) << 16) |
+           ((abgr >> 16) & 0xffu);
+}
+
 static uint32_t gpu_source_sample(MiBandGpu *gpu, const uint8_t *src,
                                   uint32_t stride, int x, int y,
                                   GpuSourceKind kind)
@@ -725,7 +734,7 @@ static uint32_t gpu_source_color_tap(MiBandGpu *gpu, const uint8_t *src,
                                      GpuSourceKind kind)
 {
     if (x < 0 || y < 0 || x >= width || y >= height) {
-        return gpu->states[0xa27];
+        return gpu_register_color(gpu->states[0xa27]);
     }
     return gpu_source_sample(gpu, src, stride, x, y, kind);
 }
@@ -747,13 +756,13 @@ static uint32_t gpu_sample_source(MiBandGpu *gpu, const uint8_t *src,
     uint32_t color[4], result = 0;
 
     if (!isfinite(u) || !isfinite(v)) {
-        return gpu->states[0xa27];
+        return gpu_register_color(gpu->states[0xa27]);
     }
     if (kind == GPU_SOURCE_A8_LINEAR) {
         /* SDK LINEAR shifts only the horizontal coordinate by half a
          * texel. Rows retain POINT sampling; COLOR supplies border taps. */
         if (u <= -1 || u >= width || v < 0 || v >= height) {
-            return gpu->states[0xa27];
+            return gpu_register_color(gpu->states[0xa27]);
         }
         x0 = floorf(u);
         fx = u - x0;
@@ -773,7 +782,7 @@ static uint32_t gpu_sample_source(MiBandGpu *gpu, const uint8_t *src,
          * borders apply independently to each tap. Rounding and the centre
          * convention are model policy pending a physical pixel capture. */
         if (u <= -2 || v <= -2 || u >= width + 1 || v >= height + 1) {
-            return gpu->states[0xa27];
+            return gpu_register_color(gpu->states[0xa27]);
         }
         x0 = floorf(u);
         y0 = floorf(v);
@@ -797,7 +806,7 @@ static uint32_t gpu_sample_source(MiBandGpu *gpu, const uint8_t *src,
         /* POINT coordinates already include the firmware's pixel-centre
          * offset. Truncate in-range coordinates; COLOR applies outside. */
         if (u < 0 || v < 0 || u >= width || v >= height) {
-            return gpu->states[0xa27];
+            return gpu_register_color(gpu->states[0xa27]);
         }
         return gpu_source_sample(gpu, src, stride, (int)u, (int)v, kind);
     }
@@ -807,7 +816,7 @@ static uint32_t gpu_sample_source(MiBandGpu *gpu, const uint8_t *src,
         u = CLAMP(u, 0, width - 1);
         v = 0;
     } else if (u <= -1 || v <= -1 || u >= width || v >= height) {
-        return gpu->states[0xa27];
+        return gpu_register_color(gpu->states[0xa27]);
     }
     x0 = floorf(u);
     y0 = floorf(v);
@@ -880,7 +889,7 @@ static unsigned gpu_paint_pixel(MiBandGpu *gpu, uint8_t *pixel,
     pixel = channels;
     pixel_bytes = (format == 0x103 || format == 0x10a || format == 0x105 || format == 0x106) ? 4 : 3;
     if ((mode & 0x7000) == 0x2000) {
-        uint32_t modifier = gpu->states[0xa02];
+        uint32_t modifier = gpu_register_color(gpu->states[0xa02]);
         uint32_t multiplied = 0;
 
         for (channel = 0; channel < 4; channel++) {
@@ -1505,7 +1514,7 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
         } else {
             painted += gpu_path_paint_span(
                 gpu, target + (size_t)y * stride, width, pixel_bytes,
-                coverage, gpu->states[0xa02]);
+                coverage, gpu_register_color(gpu->states[0xa02]));
         }
     }
     unsigned edge_count = path.edges->len;
@@ -1547,6 +1556,7 @@ static bool gpu_blit_index8(MiBandGpu *gpu, const uint8_t *rectangle)
     float c0, c1, x0, x1, y0, y1;
     int x, y;
     unsigned sampled_alpha = 0, sampled_rgb = 0, changed = 0;
+    uint32_t pen_color = gpu_register_color(gpu->states[0xa02]);
 
     gpu_dump_draw_inputs(gpu, rectangle, 8, true);
     /* Captured reference offscreen chart clear: solid rectangle, not a texture.
@@ -1569,7 +1579,7 @@ static bool gpu_blit_index8(MiBandGpu *gpu, const uint8_t *rectangle)
             for (x = left; x < right; x++) {
                 gpu_paint_pixel(gpu, target + (size_t)y * target_stride +
                                 x * pixel_bytes, pixel_bytes,
-                                gpu->states[0xa02], 255);
+                                pen_color, 255);
             }
         }
         gpu->rendered++;

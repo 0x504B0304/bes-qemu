@@ -344,7 +344,7 @@ static void test_packed_targets(void)
                  cases[c].green[(i - start) % cases[c].bytes] : 0x55));
         }
         gpu.states[0xa00] = 0x10000102;
-        gpu.states[0xa02] = 0x80800000; /* Premultiplied half-red. */
+        gpu.states[0xa02] = 0x80000080; /* ABGR premultiplied half-red. */
         gpu.states[0xa34] = 0x100000;
         gpu.states[0xa39] = 2 << 16;
         gpu.states[0xa3a] = (2 << 16) | 4;
@@ -534,7 +534,7 @@ int main(void)
         gpu.states[0xa10] = 0x109;
         /* The synced rasterizer rejects unknown paint modes explicitly. */
         gpu.states[0xa00] = 0x10000102;
-        gpu.states[0xa02] = 0xff0000ff;
+        gpu.states[0xa02] = 0xffff0000; /* ABGR blue; target bytes are B,G,R. */
         gpu.states[0xa34] = 0x100000;
         gpu.states[0xa39] = 2 << 16;
         gpu.states[0xa3a] = (2 << 16) | 4;

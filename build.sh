@@ -64,6 +64,27 @@ PY
     "$bes_meson" configure "$qemu_src/build" -Dwerror=false
 fi
 bes_binary=qemu-system-arm
+if [[ "${BES_RELEASE_BUILD:-0}" == 1 ]]; then
+    # Preserve relative source locations for diagnostics, not host checkout paths.
+    bes_source_map=$qemu_src
+    bes_overlay_map=$script_dir
+    bes_release_prefix=
+    case "$(uname -s)" in
+        MINGW*|MSYS*)
+            bes_source_map=$(cygpath -m "$qemu_src")
+            bes_overlay_map=$(cygpath -m "$script_dir")
+            # Meson's Windows default is the build Python's venv prefix.
+            # Use a neutral relocatable installation prefix instead.
+            bes_release_prefix=C:/MiBandStudio
+            ;;
+    esac
+    bes_meson=$(sed -n 's/^MESON=//p' "$qemu_src/build/config-host.mak")
+    if [[ -n "$bes_release_prefix" ]]; then
+        "$bes_meson" configure "$qemu_src/build" "-Dprefix=$bes_release_prefix"
+    fi
+    "$bes_meson" configure "$qemu_src/build" -Ddebug=false -Dstrip=true \
+        "-Dc_args=['-ffile-prefix-map=$bes_source_map=.','-ffile-prefix-map=$bes_overlay_map=bes-qemu']"
+fi
 case "$(uname -s)" in
     MINGW*|MSYS*)
         bes_binary=qemu-system-arm.exe

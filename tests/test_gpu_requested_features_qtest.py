@@ -234,15 +234,15 @@ def main():
 
         seed()
         check('premult-solid-src-over',bytes((70,80,90)),1,1,
-              submit(draw(0x01000107,overrides={0xA00:0x10000102,0xA02:0x803c2814})))
+              submit(draw(0x01000107,overrides={0xA00:0x10000102,0xA02:0x8014283c})))
         seed(pixel=bytes((100,80,60,200)))
         check('premult-target-alpha',bytes((70,80,90,228)),1,1,
-              submit(draw(0x01000107,overrides={0xA00:0x10000102,0xA02:0x803c2814,
+              submit(draw(0x01000107,overrides={0xA00:0x10000102,0xA02:0x8014283c,
                                                 0xA10:0x103})),pixel_bytes=4)
 
         write(SOURCE_A,bytes((40,80,120)))
         for color,expected in [(0xffffffff,(40,80,120)),(0x80808080,(70,80,90)),
-                               (0x80ff4080,(70,60,150)),(0,(100,80,60))]:
+                               (0x808040ff,(70,60,150)),(0,(100,80,60))]:
             seed()
             check(f'multiply-tint-{color:08x}',bytes(expected),1,1,
                   submit(draw(0x21000100,sw=1,sh=1,overrides={0xA00:0x10002102,
@@ -269,9 +269,9 @@ def main():
 
         # A zero-alpha tint and a second draw must preserve prior submissions.
         seed(2,1)
-        first=draw(0x01000107,width=2,overrides={0xA00:0x10000102,0xA02:0xff1e140a},clip=(0,0,1,1))
+        first=draw(0x01000107,width=2,overrides={0xA00:0x10000102,0xA02:0xff0a141e},clip=(0,0,1,1))
         check('accumulation-first',bytes((10,20,30,100,80,60)),2,1,submit(first))
-        second=draw(0x01000107,width=2,overrides={0xA00:0x10000102,0xA02:0xff3c3228},clip=(1,0,1,1))
+        second=draw(0x01000107,width=2,overrides={0xA00:0x10000102,0xA02:0xff28323c},clip=(1,0,1,1))
         check('accumulation-second',bytes((10,20,30,40,50,60)),2,1,submit(second))
 
         # Unknown image/blend modes must not silently enter the solid branch.
@@ -301,7 +301,8 @@ def main():
             ss=regs[0xA2B]//4*3 if packed else regs[0xA2B]
             matrix={r:struct.unpack('<f',struct.pack('<I',regs[r]))[0]
                     for r in [0xA18,0xA19,0xA1C,0xA1D,0xA20,0xA21]}
-            color=[(regs[0xA02]>>shift)&255 for shift in (0,8,16,24)]
+            # A02 is ABGR; the oracle's texture/destination arrays are BGRA.
+            color=[(regs[0xA02]>>shift)&255 for shift in (16,8,0,24)]
             selected=[];ambiguous=0;max_bound=0
             for y in range(64,208,8):
                 for x in range(72,264,8):
