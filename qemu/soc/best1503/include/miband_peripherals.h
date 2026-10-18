@@ -114,7 +114,11 @@ void miband_dma_async_reset(MiBandDma *);
 
 typedef struct MiBandI2c {
     hwaddr base;
+    qemu_irq irq;
     uint32_t regs[0x100 / 4];
+    QEMUTimer *command_timer;
+    uint16_t command_fifo[16];
+    unsigned command_head, command_count;
     uint32_t raw_intr;
     uint32_t abort_source;
     unsigned commands;
@@ -166,6 +170,8 @@ bool miband_gpio_write(MiBandGpio *gpio, hwaddr address, unsigned size,
                        uint64_t value);
 
 void miband_i2c_init(MiBandI2c i2c[MIBAND_I2C_COUNT]);
+void miband_i2c_connect_irq(MiBandI2c *i2c, qemu_irq irq);
+void miband_i2c_reset(void *opaque);
 bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
                      unsigned size, uint64_t *result);
 bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,

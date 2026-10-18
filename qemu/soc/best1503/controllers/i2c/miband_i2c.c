@@ -2,11 +2,14 @@
  * BES I2C controller probe. Register layout matches the DesignWare-style
  * controller accessed by the firmware. Touch and charger subsets attach only
  * to the addresses selected by their explicit machine options.
+ * IRQ/threshold behaviour compared with qemu-miwear hw/misc/bes_i2c.c
+ * (GPL-2.0-or-later). Unattached addresses still NACK; no fallback slave.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "miband_peripherals.h"
 #include "miband_charger.h"
 
@@ -14,6 +17,8 @@
 #define IC_INTR_STAT        0x2c
 #define IC_INTR_MASK        0x30
 #define IC_RAW_INTR_STAT    0x34
+#define IC_RX_TL            0x38
+#define IC_TX_TL            0x3c
 #define IC_CLR_INTR         0x40
 #define IC_CLR_TX_ABRT      0x54
 #define IC_CLR_STOP_DET     0x60
@@ -27,10 +32,70 @@
 #define INTR_TX_ABRT       (1u << 6)
 #define INTR_STOP_DET      (1u << 9)
 #define INTR_RX_FULL       (1u << 2)
+#define INTR_RX_UNDER      (1u << 0)
+#define INTR_RX_OVER       (1u << 1)
+#define INTR_TX_EMPTY      (1u << 4)
+#define INTR_TX_OVER       (1u << 3)
 #define ABRT_7B_ADDR_NOACK (1u << 0)
 #define STATUS_TFNF        (1u << 1)
 #define STATUS_TFE         (1u << 2)
 #define STATUS_RFNE        (1u << 3)
+#define STATUS_RFF         (1u << 4)
+
+/* A queued byte takes nine clocks at the currently supported 400 kHz bus
+ * rate. Do not deliver a completion inside the submitting MMIO write: async
+ * clients must have time to enter their wait while the byte is on the bus.
+ * SCL divider/clock-tree timing is not modelled yet.
+ * tx_bytes/tx_count are slave protocol bytes, not controller FIFO entries. */
+#define I2C_BYTE_NS 22500
+static void miband_i2c_command_done(void *opaque);
+static void miband_i2c_update_irq(MiBandI2c *c)
+{
+    c->raw_intr &= ~(INTR_TX_EMPTY | INTR_RX_FULL);
+    if (c->regs[IC_ENABLE / 4] & 1) {
+        if (c->command_count <= c->regs[IC_TX_TL / 4]) {
+            c->raw_intr |= INTR_TX_EMPTY;
+        }
+        if (c->rx_count > c->regs[IC_RX_TL / 4]) {
+            c->raw_intr |= INTR_RX_FULL;
+        }
+    }
+    qemu_set_irq(c->irq, (c->regs[IC_ENABLE / 4] & 1) &&
+                 (c->raw_intr & c->regs[IC_INTR_MASK / 4]));
+}
+
+void miband_i2c_connect_irq(MiBandI2c *c, qemu_irq irq)
+{
+    c->irq = irq;
+    miband_i2c_update_irq(c);
+}
+
+static void miband_i2c_bus_reset(MiBandI2c *c)
+{
+    if (c->endpoint.reset) {
+        c->endpoint.reset(c->endpoint.opaque);
+    }
+    if (c->charger) {
+        miband_charger_bus_reset(c->charger);
+    }
+    if (c->command_timer) {
+        timer_del(c->command_timer);
+    }
+    c->command_head = c->command_count = 0;
+    c->endpoint_active = false;
+    c->endpoint_read = false;
+    c->tx_count = c->read_offset = c->rx_head = c->rx_count = 0;
+}
+
+void miband_i2c_reset(void *opaque)
+{
+    MiBandI2c *c = opaque;
+    miband_i2c_bus_reset(c);
+    memset(c->regs, 0, sizeof(c->regs));
+    c->raw_intr = c->abort_source = 0;
+    c->probe_register = 0;
+    miband_i2c_update_irq(c);
+}
 
 static MiBandI2c *miband_i2c_find(MiBandI2c i2c[MIBAND_I2C_COUNT],
                                    hwaddr address, hwaddr *offset)
@@ -85,6 +150,8 @@ void miband_i2c_init(MiBandI2c i2c[MIBAND_I2C_COUNT])
 
     for (i = 0; i < MIBAND_I2C_COUNT; i++) {
         i2c[i].base = bases[i];
+        i2c[i].command_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                            miband_i2c_command_done, &i2c[i]);
     }
 }
 
@@ -115,6 +182,9 @@ bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
             }
         } else {
             *result = 0;
+            if (c->regs[IC_ENABLE / 4] & 1) {
+                c->raw_intr |= INTR_RX_UNDER;
+            }
         }
         break;
     case IC_INTR_STAT:
@@ -133,16 +203,34 @@ bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
         c->abort_source = 0;
         *result = 0;
         break;
+    case 0x44: /* CLR_RX_UNDER */
+        c->raw_intr &= ~INTR_RX_UNDER;
+        *result = 0;
+        break;
+    case 0x48: /* CLR_RX_OVER */
+        c->raw_intr &= ~INTR_RX_OVER;
+        *result = 0;
+        break;
+    case 0x4c:
+        c->raw_intr &= ~INTR_TX_OVER;
+        *result = 0;
+        break;
+    case 0x50: case 0x58: case 0x5c: case 0x64: case 0x68:
+        /* Other latched sources are currently never asserted. */
+        *result = 0;
+        break;
     case IC_CLR_STOP_DET:
         c->raw_intr &= ~INTR_STOP_DET;
         *result = 0;
         break;
     case IC_STATUS:
-        *result = STATUS_TFNF | STATUS_TFE |
-                  (c->rx_count ? STATUS_RFNE : 0);
+        *result = (c->command_count < ARRAY_SIZE(c->command_fifo) ? STATUS_TFNF : 0) |
+                  (c->command_count ? 1 : STATUS_TFE) |
+                  (c->rx_count ? STATUS_RFNE : 0) |
+                  (c->rx_count == ARRAY_SIZE(c->rx_fifo) ? STATUS_RFF : 0);
         break;
     case IC_TXFLR:
-        *result = 0;
+        *result = c->command_count;
         break;
     case IC_RXFLR:
         *result = c->rx_count;
@@ -161,7 +249,119 @@ bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
         }
         break;
     }
+    miband_i2c_update_irq(c);
     return true;
+}
+
+static void miband_i2c_execute(MiBandI2c *c, uint32_t value)
+{
+    bool endpoint_ack = c->endpoint.address &&
+                        (c->regs[0x04 / 4] & 0x7f) == c->endpoint.address;
+    bool charger_ack = c->charger && c->charger->enabled &&
+                       (c->regs[0x04 / 4] & 0x7f) ==
+                       MIBAND_CHARGER_I2C_ADDRESS;
+    bool probe_ack = c->probe_address &&
+                     (c->regs[0x04 / 4] & 0x7f) == c->probe_address;
+
+    if (!(c->regs[IC_ENABLE / 4] & 1) ||
+        (c->raw_intr & INTR_TX_ABRT)) {
+        return;
+    }
+    if ((value & (1u << 8)) &&
+        c->rx_count == ARRAY_SIZE(c->rx_fifo)) {
+        c->raw_intr |= INTR_RX_OVER;
+    }
+
+    c->commands++;
+    if (endpoint_ack) {
+        bool read = value & (1u << 8);
+        if (!c->endpoint_active || c->endpoint_read != read ||
+            (value & (1u << 10))) {
+            c->endpoint.start(c->endpoint.opaque, read);
+            c->endpoint_active = true;
+            c->endpoint_read = read;
+        }
+        if (read) {
+            if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
+                c->rx_fifo[(c->rx_head + c->rx_count) % ARRAY_SIZE(c->rx_fifo)] =
+                    c->endpoint.read(c->endpoint.opaque);
+                c->rx_count++;
+                c->raw_intr |= INTR_RX_FULL;
+            }
+        } else {
+            c->endpoint.write(c->endpoint.opaque, value & 0xff);
+        }
+        if (value & (1u << 9)) {
+            c->endpoint.stop(c->endpoint.opaque);
+            c->endpoint_active = false;
+        }
+    } else if (charger_ack) {
+        if (value & (1u << 8)) {
+            if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
+                c->rx_fifo[(c->rx_head + c->rx_count) %
+                           ARRAY_SIZE(c->rx_fifo)] =
+                    miband_charger_read_command(c->charger, value);
+                c->rx_count++;
+                c->raw_intr |= INTR_RX_FULL;
+            }
+        } else {
+            miband_charger_write_command(c->charger, value);
+        }
+    } else if (probe_ack) {
+        if (value & (1u << 8)) {
+            if (c->tx_count) {
+                miband_i2c_probe_latch_register(c);
+            }
+            if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
+                c->rx_fifo[(c->rx_head + c->rx_count) %
+                           ARRAY_SIZE(c->rx_fifo)] =
+                    miband_i2c_probe_read_byte(c);
+                c->rx_count++;
+                c->raw_intr |= INTR_RX_FULL;
+            }
+        } else {
+            if ((value & (1u << 10)) && c->tx_count) {
+                miband_i2c_probe_latch_register(c);
+            }
+            if (c->tx_count < ARRAY_SIZE(c->tx_bytes)) {
+                c->tx_bytes[c->tx_count++] = value & 0xff;
+            }
+            if (value & (1u << 9)) {
+                miband_i2c_probe_latch_register(c);
+            }
+        }
+    } else {
+        c->abort_source = ABRT_7B_ADDR_NOACK;
+        c->raw_intr |= INTR_TX_ABRT;
+        miband_i2c_bus_reset(c);
+    }
+    if (value & (1u << 9)) {
+        c->raw_intr |= INTR_STOP_DET;
+    }
+    if (c->commands <= 64) {
+        qemu_log_mask(LOG_UNIMP, "miband I2C %08" HWADDR_PRIx
+                      " target=%02x command=%03" PRIx32
+                      " -> %s\n", c->base,
+                      c->regs[0x04 / 4] & 0x3ff, value & 0x7ff,
+                      endpoint_ack ? "device ACK" : charger_ack ? "charger ACK" :
+                      probe_ack ? "probe ACK" : "NACK");
+    }
+}
+
+static void miband_i2c_command_done(void *opaque)
+{
+    MiBandI2c *c = opaque;
+    if (c->command_count && (c->regs[IC_ENABLE / 4] & 1)) {
+        uint16_t value = c->command_fifo[c->command_head];
+        c->command_head = (c->command_head + 1) % ARRAY_SIZE(c->command_fifo);
+        c->command_count--;
+        miband_i2c_execute(c, value);
+        if (c->command_count) {
+            timer_mod(c->command_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + I2C_BYTE_NS);
+        }
+    }
+    miband_i2c_update_irq(c);
 }
 
 bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
@@ -181,102 +381,31 @@ bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
     }
 
     if (offset == IC_DATA_CMD) {
-        bool endpoint_ack = c->endpoint.address &&
-                            (c->regs[0x04 / 4] & 0x7f) == c->endpoint.address;
-        bool charger_ack = c->charger && c->charger->enabled &&
-                           (c->regs[0x04 / 4] & 0x7f) ==
-                           MIBAND_CHARGER_I2C_ADDRESS;
-        bool probe_ack = c->probe_address &&
-                         (c->regs[0x04 / 4] & 0x7f) == c->probe_address;
-
-        c->commands++;
-        if (endpoint_ack) {
-            bool read = value & (1u << 8);
-            if (!c->endpoint_active || c->endpoint_read != read ||
-                (value & (1u << 10))) {
-                c->endpoint.start(c->endpoint.opaque, read);
-                c->endpoint_active = true;
-                c->endpoint_read = read;
-            }
-            if (read) {
-                if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
-                    c->rx_fifo[(c->rx_head + c->rx_count) % ARRAY_SIZE(c->rx_fifo)] =
-                        c->endpoint.read(c->endpoint.opaque);
-                    c->rx_count++;
-                    c->raw_intr |= INTR_RX_FULL;
-                }
-            } else {
-                c->endpoint.write(c->endpoint.opaque, value & 0xff);
-            }
-            if (value & (1u << 9)) {
-                c->endpoint.stop(c->endpoint.opaque);
-                c->endpoint_active = false;
-            }
-        } else if (charger_ack) {
-            if (value & (1u << 8)) {
-                if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
-                    c->rx_fifo[(c->rx_head + c->rx_count) %
-                               ARRAY_SIZE(c->rx_fifo)] =
-                        miband_charger_read_command(c->charger, value);
-                    c->rx_count++;
-                    c->raw_intr |= INTR_RX_FULL;
-                }
-            } else {
-                miband_charger_write_command(c->charger, value);
-            }
-        } else if (probe_ack) {
-            if (value & (1u << 8)) {
-                if (c->tx_count) {
-                    miband_i2c_probe_latch_register(c);
-                }
-                if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
-                    c->rx_fifo[(c->rx_head + c->rx_count) %
-                               ARRAY_SIZE(c->rx_fifo)] =
-                        miband_i2c_probe_read_byte(c);
-                    c->rx_count++;
-                    c->raw_intr |= INTR_RX_FULL;
-                }
-            } else {
-                if ((value & (1u << 10)) && c->tx_count) {
-                    miband_i2c_probe_latch_register(c);
-                }
-                if (c->tx_count < ARRAY_SIZE(c->tx_bytes)) {
-                    c->tx_bytes[c->tx_count++] = value & 0xff;
-                }
-                if (value & (1u << 9)) {
-                    miband_i2c_probe_latch_register(c);
-                }
-            }
+        if (!(c->regs[IC_ENABLE / 4] & 1) ||
+            (c->raw_intr & INTR_TX_ABRT)) {
+            return true;
+        }
+        if (c->command_count == ARRAY_SIZE(c->command_fifo)) {
+            c->raw_intr |= INTR_TX_OVER;
         } else {
-            c->abort_source = ABRT_7B_ADDR_NOACK;
-            c->raw_intr |= INTR_TX_ABRT;
-        }
-        if (value & (1u << 9)) {
-            c->raw_intr |= INTR_STOP_DET;
-        }
-        if (c->commands <= 64) {
-            qemu_log_mask(LOG_UNIMP, "miband I2C %08" HWADDR_PRIx
-                          " target=%02x command=%03" PRIx64
-                          " -> %s\n", c->base,
-                          c->regs[0x04 / 4] & 0x3ff, value & 0x7ff,
-                          endpoint_ack ? "device ACK" : charger_ack ? "charger ACK" :
-                          probe_ack ? "probe ACK" : "NACK");
+            c->command_fifo[(c->command_head + c->command_count) %
+                            ARRAY_SIZE(c->command_fifo)] = value;
+            if (!c->command_count++) {
+                timer_mod(c->command_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + I2C_BYTE_NS);
+            }
         }
     } else {
+        if (offset == IC_RX_TL || offset == IC_TX_TL) {
+            value = MIN(value, ARRAY_SIZE(c->rx_fifo) - 1);
+        }
         c->regs[offset / 4] = value;
         if (offset == 0x04 || (offset == IC_ENABLE && !(value & 1))) {
-            if (c->endpoint.reset) {
-                c->endpoint.reset(c->endpoint.opaque);
-            }
-            c->endpoint_active = false;
-            if (c->charger) {
-                miband_charger_bus_reset(c->charger);
-            }
-            c->tx_count = 0;
-            c->read_offset = 0;
-            c->rx_head = 0;
-            c->rx_count = 0;
+            miband_i2c_bus_reset(c);
             c->raw_intr &= ~INTR_RX_FULL;
+        }
+        if (offset == IC_ENABLE && !(value & 1)) {
+            c->raw_intr = c->abort_source = 0;
         }
         if ((offset == 0x04 || offset == IC_ENABLE) &&
             c->trace_events++ < 64) {
@@ -285,5 +414,6 @@ bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
                           "\n", c->base, offset, value);
         }
     }
+    miband_i2c_update_irq(c);
     return true;
 }

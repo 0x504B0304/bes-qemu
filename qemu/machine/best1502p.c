@@ -500,9 +500,6 @@ static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysme
     sysbus_realize(SYS_BUS_DEVICE(&s->dsi), &error_fatal);
     memory_region_add_subregion_overlap(sysmem, 0x40230000,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dsi), 0), 4);
-    if (s->touch_chip_id || s->charger_model) {
-        miband_i2c_init(s->touch_i2c);
-    }
     if (s->charger_model) {
         if (s->charger_i2c_bus >= MIBAND_I2C_COUNT ||
             !s->charger_probe_revision || s->charger_probe_revision > UINT8_MAX) {
@@ -549,8 +546,7 @@ static uint64_t best1502p_mmio_read(void *opaque, hwaddr offset,
     uint32_t value = index < ARRAY_SIZE(mmio->words) ? mmio->words[index] : 0;
     uint64_t gpio_value;
 
-    if ((mmio->machine->touch_chip_id || mmio->machine->charger_model) &&
-        miband_i2c_read(mmio->machine->touch_i2c, mmio->base + offset,
+    if (miband_i2c_read(mmio->machine->touch_i2c, mmio->base + offset,
                         size, &gpio_value)) {
         return gpio_value;
     }
@@ -594,8 +590,7 @@ static void best1502p_mmio_write(void *opaque, hwaddr offset,
     Best1502pMmio *mmio = opaque;
     uint32_t index = offset >> 2;
 
-    if ((mmio->machine->touch_chip_id || mmio->machine->charger_model) &&
-        miband_i2c_write(mmio->machine->touch_i2c, mmio->base + offset,
+    if (miband_i2c_write(mmio->machine->touch_i2c, mmio->base + offset,
                          size, value)) {
         return;
     }
@@ -1256,6 +1251,17 @@ static void best1502p_init(MachineState *machine)
     object_property_set_link(OBJECT(&s->armv7m), "memory",
                              OBJECT(sysmem), &error_fatal);
     sysbus_realize(SYS_BUS_DEVICE(&s->armv7m), &error_fatal);
+    /* BES AP I2C routing, also recorded by qemu-miwear best1503.c.
+     * I2C7's route is unqualified; retain MMIO without guessing its IRQ. */
+    static const unsigned i2c_irqs[] = { 14, 29, 64, 65, 53, 54, 55 };
+    miband_i2c_init(s->touch_i2c);
+    for (unsigned i = 0; i < MIBAND_I2C_COUNT; i++) {
+        if (i < ARRAY_SIZE(i2c_irqs)) {
+            miband_i2c_connect_irq(&s->touch_i2c[i],
+                                  qdev_get_gpio_in(armv7m, i2c_irqs[i]));
+        }
+        qemu_register_reset(miband_i2c_reset, &s->touch_i2c[i]);
+    }
     /* reference UART table: UART1 0x4000c000 -> IRQ18, UART2 0x4000d000
      * -> IRQ26. Route PL011 RX/TX/error status through the AP NVIC. */
     s->uart_irq[0] = (Best1502pUartIrq) { &s->uart1, qdev_get_gpio_in(armv7m, 18) };

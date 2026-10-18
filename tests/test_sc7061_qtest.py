@@ -20,15 +20,20 @@ class ChargerIdentity(unittest.TestCase):
             serial_backends=('none', 'none'))
         self.addCleanup(self.q.close)
         self.q.write32(0x40005004, 7)
+        self.q.write32(0x4000506c, 1)
 
     def read_reg(self, reg):
         self.q.write32(0x40005010, reg | 0x400)
         self.q.write32(0x40005010, 0x300)
+        self.q.command('clock_step 22500')
+        self.q.command('clock_step 22500')
         return self.q.read32(0x40005010)
 
     def write_reg(self, reg, value):
         self.q.write32(0x40005010, reg | 0x400)
         self.q.write32(0x40005010, value | 0x200)
+        self.q.command('clock_step 22500')
+        self.q.command('clock_step 22500')
 
     def test_default_identity(self):
         self.start()
@@ -102,6 +107,7 @@ class ChargerIdentity(unittest.TestCase):
         self.assertEqual(self.read_reg(0x30), 8)
         self.q.qmp('system_reset')
         self.q.write32(0x40005004, 7)
+        self.q.write32(0x4000506c, 1)
         self.assertEqual(self.read_reg(0), 0xe0)
         self.assertEqual(self.read_reg(1), 6)
         self.assertEqual(self.read_reg(0x30), 0x28)

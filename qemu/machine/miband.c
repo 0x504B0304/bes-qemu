@@ -773,6 +773,16 @@ static void miband_init(MachineState *machine)
     object_property_set_link(OBJECT(&s->armv7m), "memory",
                              OBJECT(sysmem), &error_fatal);
     sysbus_realize(SYS_BUS_DEVICE(&s->armv7m), &error_fatal);
+    /* BES1503 AP I2C0..6 routing (qemu-miwear best1503.c / SDK table).
+     * Do not assign an unverified I2C7 interrupt. */
+    static const unsigned i2c_irqs[] = { 14, 29, 64, 65, 53, 54, 55 };
+    for (unsigned i = 0; i < MIBAND_I2C_COUNT; i++) {
+        if (i < ARRAY_SIZE(i2c_irqs)) {
+            miband_i2c_connect_irq(&s->i2c[i],
+                                  qdev_get_gpio_in(armv7m, i2c_irqs[i]));
+        }
+        qemu_register_reset(miband_i2c_reset, &s->i2c[i]);
+    }
     /* The AP firmware uses interrupt-driven UART RX.  Wire the PL011 RX
      * interrupt to the BES1503 UART lines; TX remains available through the
      * chardev even when RX is idle. */

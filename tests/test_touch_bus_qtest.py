@@ -59,6 +59,8 @@ def main():
                 return int(reply[1], 0) if len(reply) > 1 else None
             def wr(address, value):
                 cmd(f'writel {address:#x} {value:#x}')
+                if address == 0x40063010:
+                    cmd('clock_step 22500')
             def rd(address):
                 return cmd(f'readl {address:#x}')
             def report(register=0x8000, length=10):
@@ -73,6 +75,7 @@ def main():
                     {'type': 'abs', 'data': {'axis': 'x', 'value': x}},
                     {'type': 'abs', 'data': {'axis': 'y', 'value': y}},
                     {'type': 'btn', 'data': {'button': 'left', 'down': down}}]})
+            wr(0x4006306c, 1)
             assert report(0xcc, 2) == bytes.fromhex('23 e6')
             assert report(0x1c00, 2) == bytes.fromhex('49 5a')
             assert report() == bytes(10)
