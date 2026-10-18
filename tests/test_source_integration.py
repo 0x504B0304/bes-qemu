@@ -60,6 +60,12 @@ class Integration(unittest.TestCase):
         backport_fixture(root, qemu, {
             'hw/sd/sd.c': (b'/* SD/MMC read-ahead */\n', b'/* SD/MMC read-ahead, media events */\n')},
             package_name='sd-media-state')
+        backport_fixture(root, qemu, {
+            'ui/vnc.c': (b'/* 30 ms refresh */\n', b'/* 16 ms refresh */\n')},
+            package_name='vnc-refresh-60hz')
+        backport_fixture(root, qemu, {
+            'os-win32.c': (b'/* default timer */\n', b'/* 1 ms timer */\n')},
+            package_name='win32-timer-resolution')
         (qemu / 'hw/sd/sd.c').write_bytes(b'/* SD */\n')
         (qemu / 'accel/tcg/cputlb.c').write_bytes(b'/* section index */\n')
         return root, qemu

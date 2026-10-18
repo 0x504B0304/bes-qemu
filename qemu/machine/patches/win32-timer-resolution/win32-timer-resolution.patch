@@ -1,0 +1,24 @@
+--- a/os-win32.c
++++ b/os-win32.c
+@@ -48,8 +48,21 @@
+ }
+ 
+ void os_setup_early_signal_handling(void)
+ {
++    /* Windows 11 ignores timeBeginPeriod() for processes without a visible
++     * window unless they opt out of timer-resolution power throttling. A
++     * headless QEMU otherwise wakes its main loop on the 15.6 ms default
++     * tick, which delays every virtual-clock device timer. Older Windows
++     * releases reject the class; the request below still applies there. */
++    PROCESS_POWER_THROTTLING_STATE throttling = {
++        .Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION,
++        .ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
++        .StateMask = 0,
++    };
++
++    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
++                          &throttling, sizeof(throttling));
+     SetConsoleCtrlHandler(qemu_ctrl_handler, TRUE);
+     timeGetDevCaps(&mm_tc, sizeof(mm_tc));
+     timeBeginPeriod(mm_tc.wPeriodMin);
+     atexit(os_undo_timer_resolution);

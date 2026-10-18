@@ -1,0 +1,34 @@
+--- a/ui/vnc.c
++++ b/ui/vnc.c
+@@ -55,11 +55,14 @@
+ #include "qemu/help_option.h"
+ #include "io/dns-resolver.h"
+ #include "monitor/monitor.h"
+ 
+-#define VNC_REFRESH_INTERVAL_BASE GUI_REFRESH_INTERVAL_DEFAULT
+-#define VNC_REFRESH_INTERVAL_INC  50
+-#define VNC_REFRESH_INTERVAL_MAX  GUI_REFRESH_INTERVAL_IDLE
++/* Wearable panels refresh at 60 Hz and guest animations start without VNC
++ * input, so keep the idle back-off short instead of the 3 s upstream ceiling.
++ */
++#define VNC_REFRESH_INTERVAL_BASE 16
++#define VNC_REFRESH_INTERVAL_INC  16
++#define VNC_REFRESH_INTERVAL_MAX  80
+ static const struct timeval VNC_REFRESH_STATS = { 0, 500000 };
+ static const struct timeval VNC_REFRESH_LOSSY = { 2, 0 };
+ 
+ #include "vnc_keysym.h"
+@@ -668,8 +671,13 @@
+     VncDisplay *vd = container_of(dcl, VncDisplay, dcl);
+     struct VncSurface *s = &vd->guest;
+ 
+     vnc_set_area_dirty(s->dirty, vd, x, y, w, h);
++    /* A guest-originated frame ends the idle back-off like client input. */
++    if (!QTAILQ_EMPTY(&vd->clients) &&
++        vd->dcl.update_interval > VNC_REFRESH_INTERVAL_BASE) {
++        update_displaychangelistener(&vd->dcl, VNC_REFRESH_INTERVAL_BASE);
++    }
+ }
+ 
+ void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
+                             int32_t encoding)

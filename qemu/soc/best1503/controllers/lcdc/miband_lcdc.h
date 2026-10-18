@@ -54,6 +54,12 @@ typedef struct MiBandLcdc {
     bool trace_control;
     bool frame_requested;
     QEMUTimer *frame_event;
+    int64_t next_tick_ns;
+    /* Nonzero completes a requested frame this long after FRAME_START
+     * instead of on the next 60 Hz tick (synchronous mode only). */
+    uint64_t transfer_ns;
+    QEMUTimer *transfer_event;
+    FILE *timing;
     qemu_irq irq;
     unsigned frame_irqs;
 } MiBandLcdc;
@@ -79,6 +85,10 @@ void miband_lcdc_note_dma_write(MiBandLcdc *lcdc, uint32_t address,
                                 size_t length);
 
 void miband_lcdc_set_async(MiBandLcdc *, bool);
+/* Startup-only frame transfer time; 0 keeps next-tick completion. */
+void miband_lcdc_set_transfer_ns(MiBandLcdc *lcdc, uint64_t ns);
+/* Record a panel TE pulse in the optional display timing trace. */
+void miband_lcdc_note_te(MiBandLcdc *lcdc);
 void miband_lcdc_async_reset(MiBandLcdc *);
 void miband_lcdc_async_shutdown(MiBandLcdc *);
 #endif

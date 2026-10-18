@@ -385,6 +385,7 @@ struct Best1700MachineState {
     MemoryRegion emmc_dma;
     char *emmc_drive;
     uint32_t panel_te_pin;
+    uint32_t lcdc_transfer_us;
     char *panel_read_responses;
     GBytes *panel_reads[256];
     Best1700Memsc sys_memsc;
@@ -475,10 +476,41 @@ static void best1700_panel_te(void *opaque)
 {
     Best1700MachineState *s = opaque;
     if (s->panel_te_pin < 96) {
+        miband_lcdc_note_te(&s->lcdc);
         best1700_gpio_set_input(&s->gpio, s->panel_te_pin, false);
         best1700_gpio_set_input(&s->gpio, s->panel_te_pin, true);
         best1700_gpio_set_input(&s->gpio, s->panel_te_pin, false);
     }
+}
+
+static void best1700_get_lcdc_transfer_us(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    uint32_t value = MIBAND_BEST1700(obj)->lcdc_transfer_us;
+    visit_type_uint32(v, name, &value, errp);
+}
+
+/* Model policy, not a measured DSI rate: 0 completes a requested frame on
+ * the next 60 Hz tick; N completes it N us after FRAME_START. */
+static void best1700_set_lcdc_transfer_us(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    uint32_t value;
+    if (s->workers_started) {
+        error_setg(errp, "lcdc-transfer-us is startup-only");
+        return;
+    }
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value > 100000) {
+        error_setg(errp, "lcdc-transfer-us must be at most 100000");
+        return;
+    }
+    s->lcdc_transfer_us = value;
 }
 
 static void best1700_get_panel_te_pin(Object *obj, Visitor *v,
@@ -3386,6 +3418,12 @@ static void best1700_init(MachineState *machine)
                      BEST1700_RAM_SIZE);
     miband_lcdc_set_base(&s->lcdc, BEST1700_LCDC_BASE);
     miband_lcdc_set_memory(&s->lcdc, s, best1700_display_memory);
+    if (!s->lcdc_transfer_us && g_getenv("MIBAND_LCDC_TRANSFER_US")) {
+        /* Experiment override for launchers that own the -M line. */
+        s->lcdc_transfer_us = MIN(strtoul(g_getenv("MIBAND_LCDC_TRANSFER_US"),
+                                          NULL, 10), 100000);
+    }
+    miband_lcdc_set_transfer_ns(&s->lcdc, (uint64_t)s->lcdc_transfer_us * 1000);
     miband_lcdc_connect_irq(&s->lcdc,
                             qdev_get_gpio_in(DEVICE(&s->core[0].cpu),
                                              BEST1700_LCDC_IRQ));
@@ -3774,6 +3812,9 @@ static void best1700_machine_class_init(ObjectClass *oc, void *data)
     object_class_property_add(oc, "panel-te-pin", "uint32",
                               best1700_get_panel_te_pin,
                               best1700_set_panel_te_pin, NULL, NULL);
+    object_class_property_add(oc, "lcdc-transfer-us", "uint32",
+                              best1700_get_lcdc_transfer_us,
+                              best1700_set_lcdc_transfer_us, NULL, NULL);
     object_class_property_add_str(oc, "cp-image", best1700_get_cp_image,
                                   best1700_set_cp_image);
     object_class_property_add_str(oc, "bth-image", best1700_get_bth_image,

@@ -8,9 +8,8 @@ struct MiBandDisplayBridge {
     bool valid;
 };
 
-static void display_invalidate(void *opaque) { }
-
-static void display_update(void *opaque)
+/* Presentation pushes exact dirty rows; a console refresh adds no work. */
+static void display_invalidate(void *opaque)
 {
     MiBandDisplayBridge *bridge = opaque;
     if (bridge->valid) {
@@ -20,7 +19,6 @@ static void display_update(void *opaque)
 
 static const GraphicHwOps display_ops = {
     .invalidate = display_invalidate,
-    .gfx_update = display_update,
 };
 
 MiBandDisplayBridge *miband_display_bridge_new(unsigned width, unsigned height)
@@ -52,15 +50,27 @@ void miband_display_bridge_present(void *opaque, const uint8_t *pixels,
     if (!pixels) {
         bridge->valid = false;
         memset(surface_data(surface), 0, (size_t)surface_stride(surface) * height);
-    } else {
-        if (surface_bits_per_pixel(surface) != 32) {
-            return;
-        }
-        for (unsigned y = 0; y < height; y++) {
-            memcpy(surface_data(surface) + (size_t)y * surface_stride(surface),
-                   pixels + (size_t)y * width * 4, width * 4);
-        }
-        bridge->valid = true;
+        dpy_gfx_update(bridge->console, 0, 0, width, height);
+        return;
     }
-    dpy_gfx_update(bridge->console, 0, 0, width, height);
+    if (surface_bits_per_pixel(surface) != 32) {
+        return;
+    }
+    /* Copy and report only the rows that differ from the host surface, so
+     * VNC compares and encodes the changed band instead of every frame. */
+    unsigned first = height, last = 0;
+    for (unsigned y = 0; y < height; y++) {
+        uint8_t *row = surface_data(surface) + (size_t)y * surface_stride(surface);
+        const uint8_t *source = pixels + (size_t)y * width * 4;
+        if (bridge->valid && !memcmp(row, source, width * 4)) {
+            continue;
+        }
+        memcpy(row, source, width * 4);
+        first = MIN(first, y);
+        last = y;
+    }
+    bridge->valid = true;
+    if (first < height) {
+        dpy_gfx_update(bridge->console, 0, first, width, last - first + 1);
+    }
 }

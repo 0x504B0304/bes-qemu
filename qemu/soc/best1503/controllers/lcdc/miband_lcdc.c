@@ -282,6 +282,28 @@ static void lcdc_dump_panel(const MiBandLcdc *lcdc)
     g_free(path);
 }
 
+/* A requested transfer is presented whatever its hash, so the hash is only
+ * needed for unrequested scanout comparison, the opt-in GPU bridge, frame
+ * dumps and the bounded completion log.  Skipping it removes a byte-serial
+ * pass over every frame; lcdc_hash_valid then forces the next comparison. */
+static bool lcdc_hash_needed(const MiBandLcdc *lcdc, unsigned logged)
+{
+    return !lcdc->frame_requested || lcdc->bridge_frames || lcdc_dump_dir() ||
+           (qemu_loglevel_mask(LOG_UNIMP) && logged <= lcdc_diagnostic_limit());
+}
+
+/* MIBAND_DISPLAY_TIMING_FILE: one CSV row per tick, TE, FRAME_START and
+ * frame-done event: event,realtime_ns,virtual_ns,frame_irqs. */
+static void lcdc_timing(MiBandLcdc *lcdc, const char *event)
+{
+    if (lcdc->timing) {
+        fprintf(lcdc->timing, "%s,%" PRId64 ",%" PRId64 ",%u\n", event,
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), lcdc->frame_irqs);
+        fflush(lcdc->timing);
+    }
+}
+
 static bool lcdc_panel_visible(const MiBandLcdc *lcdc)
 {
     return lcdc->panel.status(lcdc->panel.opaque).visible;
@@ -294,17 +316,25 @@ static void lcdc_convert_frame(uint8_t *output, const uint8_t *source,
                                uint32_t panel_width, uint32_t panel_height)
 {
     unsigned x, y;
+    unsigned rows = MIN(height, panel_height);
+    unsigned columns = MIN(width, panel_width);
 
-    memset(output, 0, (size_t)panel_width * panel_height * 4);
-    for (y = 0; y < MIN(height, panel_height); y++) {
+    /* Clear only the border the source does not cover; the format is fixed
+     * for the whole frame, so select the pixel loop once per row. */
+    if (rows < panel_height || columns < panel_width) {
+        memset(output, 0, (size_t)panel_width * panel_height * 4);
+    }
+    for (y = 0; y < rows; y++) {
         const uint8_t *src = source + (size_t)y * stride;
         uint32_t *dst = (uint32_t *)(output +
                                      (size_t)y * panel_width * 4);
 
-        for (x = 0; x < MIN(width, panel_width); x++) {
-            if (gpu_format) {
+        if (gpu_format) {
+            for (x = 0; x < columns; x++, src += pixel_bytes) {
                 dst[x] = miband_gpu_pixel_read(src, gpu_format) | 0xff000000;
-            } else if (pixel_bytes == 2) {
+            }
+        } else if (pixel_bytes == 2) {
+            for (x = 0; x < columns; x++, src += 2) {
                 uint16_t pixel = src[0] | ((uint16_t)src[1] << 8);
                 uint32_t r = (pixel >> 11) & 0x1f;
                 uint32_t g = (pixel >> 5) & 0x3f;
@@ -312,11 +342,12 @@ static void lcdc_convert_frame(uint8_t *output, const uint8_t *source,
 
                 dst[x] = 0xff000000 | ((r << 3 | r >> 2) << 16) |
                          ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-            } else {
+            }
+        } else {
+            for (x = 0; x < columns; x++, src += pixel_bytes) {
                 dst[x] = 0xff000000 | src[0] | ((uint32_t)src[1] << 8) |
                          ((uint32_t)src[2] << 16);
             }
-            src += pixel_bytes;
         }
     }
 }
@@ -771,7 +802,10 @@ static void lcdc_commit_frame(MiBandLcdc *lcdc)
     }
     length = (size_t)width * height * pixel_bytes;
     if (lcdc->dma_frame_ready) {
-        hash = lcdc_hash_bytes(lcdc->dma_completed_frame, length);
+        bool hashed = lcdc_hash_needed(lcdc, MIN(lcdc->dma_frames,
+                                                 lcdc->scanout_frames));
+
+        hash = hashed ? lcdc_hash_bytes(lcdc->dma_completed_frame, length) : 0;
         changed = lcdc->frame_requested || !lcdc->panel.status(lcdc->panel.opaque).gram_valid ||
                   !lcdc->lcdc_hash_valid || lcdc->bridge_active ||
                   hash != lcdc->lcdc_hash;
@@ -801,7 +835,7 @@ static void lcdc_commit_frame(MiBandLcdc *lcdc)
             }
         }
         lcdc->lcdc_hash = hash;
-        lcdc->lcdc_hash_valid = true;
+        lcdc->lcdc_hash_valid = hashed;
         lcdc->bridge_active = false;
         lcdc->pending_gpu = false;
         lcdc->lcdc_dirty = false;
@@ -814,7 +848,10 @@ static void lcdc_commit_frame(MiBandLcdc *lcdc)
 
     normal = lcdc_memory_ptr(lcdc, address,
                             (size_t)stride * height);
-    if (normal) {
+    if (normal && !lcdc_hash_needed(lcdc, lcdc->scanout_frames)) {
+        changed = true;
+        lcdc->lcdc_hash_valid = false;
+    } else if (normal) {
         hash = lcdc_hash_frame(normal, stride, width, height, pixel_bytes);
         /* A requested transfer is valid even when its bytes repeat the last
          * frame.  Hash equality is not a panel-frame acceptance condition. */
@@ -936,12 +973,61 @@ void miband_lcdc_note_dma_write(MiBandLcdc *lcdc, uint32_t address,
     }
 }
 
-static void miband_lcdc_frame_tick(void *opaque)
+/* Commit a requested frame and latch frame-done once its source is ready. */
+static bool lcdc_complete_frame(MiBandLcdc *lcdc)
 {
-    MiBandLcdc *lcdc = opaque;
     uint32_t width, height, stride;
     unsigned pixel_bytes;
 
+    if (!lcdc->frame_requested ||
+        lcdc->panel.status(lcdc->panel.opaque).sleeping ||
+        (!lcdc->dma_frame_ready && lcdc->dma_in_progress) ||
+        !lcdc_frame_config(lcdc, &width, &height, &stride, &pixel_bytes) ||
+        width != lcdc->width || height != lcdc->height ||
+        !lcdc_memory_ptr(lcdc, lcdc->regs[0xf4 / 4], (size_t)stride * height)) {
+        return false;
+    }
+    lcdc_commit_frame(lcdc);
+    lcdc->frame_requested = false;
+    lcdc->regs[LCDC_FRAME_START / 4] &= ~1u;
+    lcdc->regs[LCDC_IRQ_STATUS / 4] |= LCDC_TXC_FRAME_DONE | LCDC_SCANOUT_DONE;
+    lcdc_timing(lcdc, "done");
+    return true;
+}
+
+static void lcdc_raise_frame_irq(MiBandLcdc *lcdc)
+{
+    if (lcdc->regs[LCDC_IRQ_STATUS / 4] &
+        lcdc->regs[LCDC_IRQ_ENABLE / 4]) {
+        qemu_set_irq(lcdc->irq, 1);
+        lcdc->frame_irqs++;
+        if (lcdc->frame_irqs <= lcdc_diagnostic_limit() || lcdc->frame_irqs % 600 == 0) {
+            qemu_log_mask(LOG_UNIMP,
+                          "miband LCDC frame IRQ %u status=%08x virtual_ms=%"
+                          PRId64 "\n", lcdc->frame_irqs,
+                          lcdc->regs[LCDC_IRQ_STATUS / 4],
+                          qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+        }
+    }
+}
+
+static void lcdc_transfer_done(void *opaque)
+{
+    MiBandLcdc *lcdc = opaque;
+
+    /* A frame that cannot complete yet (DMA in flight, panel asleep) stays
+     * requested; the 60 Hz tick retries it as in next-tick mode. */
+    if (lcdc_complete_frame(lcdc)) {
+        lcdc_raise_frame_irq(lcdc);
+    }
+}
+
+static void miband_lcdc_frame_tick(void *opaque)
+{
+    MiBandLcdc *lcdc = opaque;
+    int64_t now;
+
+    lcdc_timing(lcdc, "tick");
     if (lcdc->async) {
         struct MiBandLcdcAsync *async = lcdc->async;
 
@@ -958,38 +1044,28 @@ static void miband_lcdc_frame_tick(void *opaque)
                                  RUN_ON_CPU_HOST_PTR(async));
             }
         }
-    } else if (lcdc->frame_requested && !lcdc->panel.status(lcdc->panel.opaque).sleeping &&
-        (lcdc->dma_frame_ready || !lcdc->dma_in_progress) &&
-        lcdc_frame_config(lcdc, &width, &height, &stride, &pixel_bytes) &&
-        width == lcdc->width && height == lcdc->height &&
-        lcdc_memory_ptr(lcdc, lcdc->regs[0xf4 / 4], (size_t)stride * height)) {
-        lcdc_commit_frame(lcdc);
-        lcdc->frame_requested = false;
-        lcdc->regs[LCDC_FRAME_START / 4] &= ~1u;
-        lcdc->regs[LCDC_IRQ_STATUS / 4] |= LCDC_TXC_FRAME_DONE | LCDC_SCANOUT_DONE;
+    } else if (lcdc->transfer_ns && timer_pending(lcdc->transfer_event)) {
+        /* The transfer timer completes this request. */
+    } else if (lcdc_complete_frame(lcdc)) {
+        /* Next-tick completion, or a transfer deferred by DMA or sleep. */
     } else if (lcdc->pending_gpu && lcdc_panel_visible(lcdc)) {
         /* Opt-in diagnostic bridge only.  It must not signal a hardware
          * completion or consume the firmware's pending framebuffer queue. */
         lcdc_commit_frame(lcdc);
     }
-    if (lcdc->regs[LCDC_IRQ_STATUS / 4] &
-        lcdc->regs[LCDC_IRQ_ENABLE / 4]) {
-        qemu_set_irq(lcdc->irq, 1);
-        lcdc->frame_irqs++;
-        if (lcdc->frame_irqs <= lcdc_diagnostic_limit() || lcdc->frame_irqs % 600 == 0) {
-            qemu_log_mask(LOG_UNIMP,
-                          "miband LCDC frame IRQ %u status=%08x virtual_ms=%"
-                          PRId64 "\n", lcdc->frame_irqs,
-                          lcdc->regs[LCDC_IRQ_STATUS / 4],
-                          qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
-        }
-    }
+    lcdc_raise_frame_irq(lcdc);
     /* Panel TE is a separate input to the GPIO controller. It schedules
      * the firmware worker; it is never a transfer completion itself.
      * 60 Hz remains a timing approximation pending panel-rate evidence. */
     lcdc->panel.tick(lcdc->panel.opaque);
-    timer_mod(lcdc->frame_event,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCDC_FRAME_NS);
+    /* Advance from the previous deadline: host timer slack must delay a
+     * tick, not lower the panel rate. Resynchronize after a long stall. */
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    lcdc->next_tick_ns += LCDC_FRAME_NS;
+    if (lcdc->next_tick_ns + LCDC_FRAME_NS <= now) {
+        lcdc->next_tick_ns = now + LCDC_FRAME_NS;
+    }
+    timer_mod(lcdc->frame_event, lcdc->next_tick_ns);
 }
 
 void miband_lcdc_connect_irq(MiBandLcdc *lcdc, qemu_irq irq)
@@ -997,8 +1073,10 @@ void miband_lcdc_connect_irq(MiBandLcdc *lcdc, qemu_irq irq)
     lcdc->irq = irq;
     lcdc->frame_event = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                      miband_lcdc_frame_tick, lcdc);
-    timer_mod(lcdc->frame_event,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCDC_FRAME_NS);
+    lcdc->transfer_event = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                        lcdc_transfer_done, lcdc);
+    lcdc->next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCDC_FRAME_NS;
+    timer_mod(lcdc->frame_event, lcdc->next_tick_ns);
 }
 
 void miband_lcdc_init(MiBandLcdc *lcdc, MiBandPanelEndpoint panel,
@@ -1018,9 +1096,22 @@ void miband_lcdc_init(MiBandLcdc *lcdc, MiBandPanelEndpoint panel,
     lcdc->ram = ram;
     lcdc->ram_size = ram_size;
     lcdc->trace_control = g_strcmp0(g_getenv("MIBAND_LCDC_TRACE_CONTROL"), "1") == 0;
+    if (g_getenv("MIBAND_DISPLAY_TIMING_FILE")) {
+        lcdc->timing = fopen(g_getenv("MIBAND_DISPLAY_TIMING_FILE"), "w");
+    }
     lcdc->dma_completed_frame = g_malloc((size_t)lcdc->width *
                                          lcdc->height * 4);
     lcdc->output_frame = g_malloc0((size_t)width * height * 4);
+}
+
+void miband_lcdc_set_transfer_ns(MiBandLcdc *lcdc, uint64_t ns)
+{
+    lcdc->transfer_ns = ns;
+}
+
+void miband_lcdc_note_te(MiBandLcdc *lcdc)
+{
+    lcdc_timing(lcdc, "te");
 }
 
 void miband_lcdc_set_base(MiBandLcdc *lcdc, uint32_t base)
@@ -1130,8 +1221,14 @@ bool miband_lcdc_write(MiBandLcdc *lcdc, hwaddr address, unsigned size,
         lcdc->regs[offset / 4] = value;
         if (offset == LCDC_FRAME_START && (value & 1)) {
             lcdc->frame_requested = true;
+            lcdc_timing(lcdc, "start");
             if (lcdc->async) {
                 lcdc_async_request(lcdc);
+            } else if (lcdc->transfer_ns && lcdc->transfer_event &&
+                       !timer_pending(lcdc->transfer_event)) {
+                timer_mod(lcdc->transfer_event,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          lcdc->transfer_ns);
             }
             qemu_log_mask(LOG_UNIMP,
                           "miband LCDC frame request source=%08x "

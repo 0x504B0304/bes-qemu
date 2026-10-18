@@ -1,0 +1,13 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "vnc-refresh-60hz.patch",
+  "patch_sha256": "5b3f3c1160051e373e5adb1c9df17f6f05c707779259b9ce80f82a5543b98e70",
+  "files": [
+    {
+      "path": "ui/vnc.c",
+      "before_sha256": "29077a522e64e392e2362ea4b5042738a98aa6835afcbb6362070df7ae7161a5",
+      "after_sha256": "5435c7a98b6f2fe09cc187d8f324ff34d06712e207d23650857393f82a6dc5fa"
+    }
+  ]
+}

@@ -36,6 +36,8 @@ typedef struct MiBandGpu {
     struct MiBandLcdc *lcdc;
     bool scanout_bridge;
     qemu_irq irq;
+    /* Use the original per-pixel paths (verification and exact logs). */
+    bool paint_reference;
 } MiBandGpu;
 
 void miband_gpu_set_worker(MiBandGpu *, CPUState *, bool);

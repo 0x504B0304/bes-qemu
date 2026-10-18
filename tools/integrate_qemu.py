@@ -67,6 +67,8 @@ def install(qemu, root=ROOT):
         ('armv7m-cache-maintenance', 'ARMv7M cache maintenance'),
         ('sd-read-ahead', 'SD/eMMC host read-ahead'),
         ('sd-media-state', 'SD/eMMC media state'),
+        ('vnc-refresh-60hz', 'VNC 60 Hz refresh'),
+        ('win32-timer-resolution', 'Win32 timer resolution'),
     ])
     for destination, content in upstream_updates:
         destination.write_bytes(content)

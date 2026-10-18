@@ -938,6 +938,102 @@ static unsigned gpu_paint_pixel(MiBandGpu *gpu, uint8_t *pixel,
     return memcmp(before, packed, packed_bytes) != 0;
 }
 
+/* Draw-invariant paint state. gpu_paint_pixel() re-reads it per pixel and
+ * counts changed pixels for logs; the fast paths below use identical
+ * arithmetic without the count. MIBAND_GPU_VERIFY compares the two. */
+typedef struct GpuPaint {
+    uint32_t format;
+    uint32_t modifier;
+    unsigned blend;
+    unsigned channels;
+    bool multiply;
+} GpuPaint;
+
+static void gpu_paint_setup(MiBandGpu *gpu, GpuPaint *paint)
+{
+    uint32_t mode = gpu->states[0xa00];
+    uint32_t format = gpu->states[0xa10];
+
+    paint->format = format;
+    paint->modifier = gpu_register_color(gpu->states[0xa02]);
+    paint->blend = mode & 0xf00;
+    paint->multiply = (mode & 0x7000) == 0x2000;
+    paint->channels = (format == 0x103 || format == 0x10a ||
+                       format == 0x105 || format == 0x106) ? 4 : 3;
+}
+
+static inline uint32_t gpu_paint_source(const GpuPaint *paint, uint32_t source)
+{
+    uint32_t multiplied = 0;
+    unsigned channel;
+
+    if (!paint->multiply) {
+        return source;
+    }
+    for (channel = 0; channel < 4; channel++) {
+        unsigned shift = channel * 8;
+        unsigned component = ((source >> shift) & 255) *
+                             ((paint->modifier >> shift) & 255);
+
+        multiplied |= ((component + 127) / 255) << shift;
+    }
+    return multiplied;
+}
+
+/* Blend a gpu_paint_source() colour. NONE, and SRC_OVER of an opaque source
+ * at full coverage, reduce exactly to storing the source colour. */
+static inline __attribute__((always_inline)) void
+gpu_paint_blend(const GpuPaint *paint, uint32_t format, uint8_t *packed,
+                uint32_t source, unsigned coverage)
+{
+    uint8_t pixel[4];
+    unsigned alpha = source >> 24, channel;
+
+    if (!coverage) {
+        return;
+    }
+    if (paint->blend == 0 ||
+        (paint->blend != 0x400 && coverage == 255 && alpha == 255)) {
+        miband_gpu_pixel_write(packed, format, source);
+        return;
+    }
+    stl_le_p(pixel, miband_gpu_pixel_read(packed, format));
+    if (paint->blend == 0x400) {
+        unsigned factor = 255 * 255 - coverage * (255 - alpha);
+
+        for (channel = 0; channel < paint->channels; channel++) {
+            pixel[channel] = (pixel[channel] * factor + 32512) / 65025;
+        }
+    } else {
+        unsigned effective_alpha = (alpha * coverage + 127) / 255;
+
+        for (channel = 0; channel < 3; channel++) {
+            unsigned source_byte = (source >> (channel * 8)) & 255;
+            unsigned value = (source_byte * coverage + pixel[channel] *
+                              (255 - effective_alpha) + 127) / 255;
+
+            pixel[channel] = MIN(value, 255);
+        }
+        if (paint->channels == 4) {
+            pixel[3] = effective_alpha +
+                       (pixel[3] * (255 - effective_alpha) + 127) / 255;
+        }
+    }
+    miband_gpu_pixel_write(packed, format, ldl_le_p(pixel));
+}
+
+/* Instantiate a pixel loop per target format so format tests fold away. */
+#define GPU_FOR_EACH_FORMAT(format, ...)                                    \
+    switch (format) {                                                       \
+    case 0x101: { const uint32_t fmt = 0x101; __VA_ARGS__; break; }         \
+    case 0x103: { const uint32_t fmt = 0x103; __VA_ARGS__; break; }         \
+    case 0x105: { const uint32_t fmt = 0x105; __VA_ARGS__; break; }         \
+    case 0x106: { const uint32_t fmt = 0x106; __VA_ARGS__; break; }         \
+    case 0x109: { const uint32_t fmt = 0x109; __VA_ARGS__; break; }         \
+    case 0x10a: { const uint32_t fmt = 0x10a; __VA_ARGS__; break; }         \
+    default: { const uint32_t fmt = (format); __VA_ARGS__; break; }         \
+    }
+
 typedef struct GpuPathEdge {
     float x0, y0, x1, y1;
     int direction;
@@ -1080,9 +1176,13 @@ static bool gpu_path_diag_enabled(void)
     if (g_private_get(&gpu_private_render)) {
         return false;
     }
-    const char *value = g_getenv("MIBAND_GPU_PATH_DIAG");
+    static int enabled = -1;
 
-    return value && !strcmp(value, "1") && gpu_path_diag_count < 256;
+    if (enabled < 0) {
+        const char *value = g_getenv("MIBAND_GPU_PATH_DIAG");
+        enabled = value && !strcmp(value, "1");
+    }
+    return enabled && gpu_path_diag_count < 256;
 }
 
 static void gpu_path_diag(const char *reason, const GpuPathState *path,
@@ -1246,6 +1346,112 @@ static unsigned gpu_path_paint_pattern_span(MiBandGpu *gpu, uint8_t *row,
     return changed;
 }
 
+static void gpu_path_fill_span_fast(const GpuPaint *paint, uint8_t *row,
+                                    uint32_t x0, uint32_t x1,
+                                    unsigned pixel_bytes,
+                                    const uint8_t *coverage, uint32_t color)
+{
+    uint32_t source = gpu_paint_source(paint, color);
+    uint32_t x;
+
+    GPU_FOR_EACH_FORMAT(paint->format, {
+        for (x = x0; x < x1; x++) {
+            gpu_paint_blend(paint, fmt, row + (size_t)x * pixel_bytes,
+                            source, coverage[x]);
+        }
+    })
+}
+
+static void gpu_path_pattern_span_fast(MiBandGpu *gpu, const GpuPaint *paint,
+                                       uint8_t *row, uint32_t x0_clip,
+                                       uint32_t x1_clip, unsigned pixel_bytes,
+                                       const uint8_t *coverage, unsigned y,
+                                       const uint8_t *source,
+                                       uint32_t source_stride,
+                                       uint32_t source_width,
+                                       uint32_t source_height,
+                                       GpuSourceKind source_kind)
+{
+    float c0 = gpu_float(gpu->states[0xa18]);
+    float c1 = gpu_float(gpu->states[0xa19]);
+    float x0 = gpu_float(gpu->states[0xa1c]);
+    float x1 = gpu_float(gpu->states[0xa1d]);
+    float y0 = gpu_float(gpu->states[0xa20]);
+    float y1 = gpu_float(gpu->states[0xa21]);
+    unsigned x;
+
+    GPU_FOR_EACH_FORMAT(paint->format, {
+        for (x = x0_clip; x < x1_clip; x++) {
+            uint32_t color;
+            float u, v;
+
+            if (!coverage[x]) {
+                continue;
+            }
+            u = (c0 + x0 * x + y0 * (float)y) *
+                (gpu->texture_texel_coordinates ? 1 : source_width);
+            v = (c1 + x1 * x + y1 * (float)y) *
+                (gpu->texture_texel_coordinates ? 1 : source_height);
+            color = gpu_sample_source(gpu, source, source_stride,
+                                      source_width, source_height,
+                                      u, v, source_kind);
+            gpu_paint_blend(paint, fmt, row + (size_t)x * pixel_bytes,
+                            gpu_paint_source(paint, color), coverage[x]);
+        }
+    })
+}
+
+/* Edges that can cross a scanline, ordered by their upper end. */
+typedef struct GpuActiveEdge {
+    float ymin, ymax;
+    const GpuPathEdge *edge;
+} GpuActiveEdge;
+
+static int gpu_active_compare_ymin(const void *a, const void *b)
+{
+    const GpuActiveEdge *left = a, *right = b;
+    return (left->ymin > right->ymin) - (left->ymin < right->ymin);
+}
+
+/* Crossing counts are small and nearly ordered between sub-scanlines. Equal
+ * x values may permute: they open and close spans at the same position, so
+ * the covered samples do not depend on their order. */
+static void gpu_path_sort_crossings(GpuPathCrossing *crossings, unsigned count)
+{
+    for (unsigned i = 1; i < count; i++) {
+        GpuPathCrossing value = crossings[i];
+        unsigned j = i;
+
+        while (j && crossings[j - 1].x > value.x) {
+            crossings[j] = crossings[j - 1];
+            j--;
+        }
+        crossings[j] = value;
+    }
+}
+
+/* Add one covered sample for every sx in [first, last), per pixel. */
+static void gpu_path_add_coverage(uint8_t *coverage, int first, int last,
+                                  unsigned grid)
+{
+    int pixel, end;
+
+    if (first >= last) {
+        return;
+    }
+    pixel = first / grid;
+    end = (last - 1) / grid;
+    if (pixel == end) {
+        coverage[pixel] += last - first;
+        return;
+    }
+    coverage[pixel] += (pixel + 1) * grid - first;
+    for (pixel++; pixel < end; pixel++) {
+        coverage[pixel] += grid;
+    }
+    coverage[end] += last - end * grid;
+}
+
 static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
 {
     uint32_t format = gpu->states[0xa10];
@@ -1268,9 +1474,12 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
     uint32_t source_stride = 0, source_width = 0, source_height = 0;
     GpuSourceKind source_kind = GPU_SOURCE_INDEX8_POINT;
     bool pattern = (gpu->states[0xa00] & 0x7000) != 0;
-    bool fp32, ok;
+    bool fp32, ok, reference;
     unsigned y, painted = 0;
     unsigned quality = path_control & 3;
+    GpuActiveEdge *sorted = NULL, **active = NULL;
+    unsigned sorted_count = 0, active_count = 0, next_edge = 0;
+    GpuPaint paint;
     unsigned sample_grid = quality == 3 ? 4 : quality == 1 ? 2 : 1;
 
     gpu_dump_draw_inputs(gpu, data, length, false);
@@ -1427,9 +1636,49 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
         return false;
     }
     crossings = g_new(GpuPathCrossing, path.edges->len);
+    reference = gpu->paint_reference || gpu_path_diag_enabled();
+    for (unsigned e = 0; !reference && e < path.edges->len; e++) {
+        GpuPathEdge *edge = &g_array_index(path.edges, GpuPathEdge, e);
+
+        /* Non-finite coordinates make crossing order ill-defined. */
+        reference = !isfinite(edge->x0) || !isfinite(edge->y0) ||
+                    !isfinite(edge->x1) || !isfinite(edge->y1);
+    }
+    if (!reference) {
+        sorted = g_new(GpuActiveEdge, path.edges->len);
+        active = g_new(GpuActiveEdge *, path.edges->len);
+        for (unsigned e = 0; e < path.edges->len; e++) {
+            GpuPathEdge *edge = &g_array_index(path.edges, GpuPathEdge, e);
+
+            if (edge->y0 != edge->y1) {
+                sorted[sorted_count++] = (GpuActiveEdge) {
+                    MIN(edge->y0, edge->y1), MAX(edge->y0, edge->y1), edge};
+            }
+        }
+        qsort(sorted, sorted_count, sizeof(*sorted), gpu_active_compare_ymin);
+        gpu_paint_setup(gpu, &paint);
+    }
     for (y = clip_y0; y < clip_y1; y++) {
         uint8_t coverage[1024] = {0};
         unsigned sy, x, samples = sample_grid * sample_grid;
+
+        if (!reference) {
+            /* Every sample of row y lies in (y, y + 1): keep edges whose
+             * span can contain one; the crossing test below is unchanged. */
+            float row_top = y, row_bottom = y + 1;
+            unsigned kept = 0;
+
+            while (next_edge < sorted_count &&
+                   sorted[next_edge].ymin < row_bottom) {
+                active[active_count++] = &sorted[next_edge++];
+            }
+            for (unsigned a = 0; a < active_count; a++) {
+                if (active[a]->ymax > row_top) {
+                    active[kept++] = active[a];
+                }
+            }
+            active_count = kept;
+        }
 
         /* Captures request LOW, MEDIUM and HIGH. The mode names suggest 1, 4
          * and 16 samples. These centred square grids are an explicit
@@ -1442,20 +1691,36 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
             int winding = 0;
             float span_start = 0;
 
-            for (i = 0; i < path.edges->len; i++) {
-                GpuPathEdge *edge = &g_array_index(path.edges, GpuPathEdge, i);
+            if (reference) {
+                for (i = 0; i < path.edges->len; i++) {
+                    GpuPathEdge *edge = &g_array_index(path.edges, GpuPathEdge, i);
 
-                if ((edge->y0 <= sample_y && edge->y1 > sample_y) ||
-                    (edge->y1 <= sample_y && edge->y0 > sample_y)) {
-                    crossings[count].x = edge->x0 +
-                        (sample_y - edge->y0) *
-                        (edge->x1 - edge->x0) / (edge->y1 - edge->y0);
-                    crossings[count].direction = edge->direction;
-                    count++;
+                    if ((edge->y0 <= sample_y && edge->y1 > sample_y) ||
+                        (edge->y1 <= sample_y && edge->y0 > sample_y)) {
+                        crossings[count].x = edge->x0 +
+                            (sample_y - edge->y0) *
+                            (edge->x1 - edge->x0) / (edge->y1 - edge->y0);
+                        crossings[count].direction = edge->direction;
+                        count++;
+                    }
                 }
+                qsort(crossings, count, sizeof(*crossings),
+                      gpu_path_compare_crossing);
+            } else {
+                for (i = 0; i < active_count; i++) {
+                    const GpuPathEdge *edge = active[i]->edge;
+
+                    if ((edge->y0 <= sample_y && edge->y1 > sample_y) ||
+                        (edge->y1 <= sample_y && edge->y0 > sample_y)) {
+                        crossings[count].x = edge->x0 +
+                            (sample_y - edge->y0) *
+                            (edge->x1 - edge->x0) / (edge->y1 - edge->y0);
+                        crossings[count].direction = edge->direction;
+                        count++;
+                    }
+                }
+                gpu_path_sort_crossings(crossings, count);
             }
-            qsort(crossings, count, sizeof(*crossings),
-                  gpu_path_compare_crossing);
             for (i = 0; i < count; i++) {
                 int previous = winding;
 
@@ -1479,8 +1744,13 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
                     last = CLAMP((int)ceilf(right * sample_grid - 0.5f),
                                  (int)(clip_x0 * sample_grid),
                                  (int)(clip_x1 * sample_grid));
-                    for (sx = first; sx < last; sx++) {
-                        coverage[sx / sample_grid]++;
+                    if (reference) {
+                        for (sx = first; sx < last; sx++) {
+                            coverage[sx / sample_grid]++;
+                        }
+                    } else {
+                        gpu_path_add_coverage(coverage, first, last,
+                                              sample_grid);
                     }
                 }
             }
@@ -1506,7 +1776,16 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
                                 first * pixel_bytes, (x - first) * pixel_bytes);
             }
         }
-        if (pattern) {
+        if (!reference && pattern) {
+            gpu_path_pattern_span_fast(
+                gpu, &paint, target + (size_t)y * stride, clip_x0, clip_x1,
+                pixel_bytes, coverage, y, source, source_stride,
+                source_width, source_height, source_kind);
+        } else if (!reference) {
+            gpu_path_fill_span_fast(
+                &paint, target + (size_t)y * stride, clip_x0, clip_x1,
+                pixel_bytes, coverage, gpu_register_color(gpu->states[0xa02]));
+        } else if (pattern) {
             painted += gpu_path_paint_pattern_span(
                 gpu, target + (size_t)y * stride, width, pixel_bytes,
                 coverage, y, source, source_stride,
@@ -1519,6 +1798,8 @@ static bool gpu_draw_path(MiBandGpu *gpu, const uint8_t *data, size_t length)
     }
     unsigned edge_count = path.edges->len;
 
+    g_free(sorted);
+    g_free(active);
     g_free(crossings);
     g_array_free(path.edges, true);
     if (gpu_path_diag_enabled()) {
@@ -1571,15 +1852,39 @@ static bool gpu_blit_index8(MiBandGpu *gpu, const uint8_t *rectangle)
         if (!target) {
             return false;
         }
-        for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
-            if (left < right) {
-                gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
-                               left * pixel_bytes, (right - left) * pixel_bytes);
+        if (gpu->paint_reference) {
+            for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
+                if (left < right) {
+                    gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
+                                   left * pixel_bytes, (right - left) * pixel_bytes);
+                }
+                for (x = left; x < right; x++) {
+                    gpu_paint_pixel(gpu, target + (size_t)y * target_stride +
+                                    x * pixel_bytes, pixel_bytes,
+                                    pen_color, 255);
+                }
             }
-            for (x = left; x < right; x++) {
-                gpu_paint_pixel(gpu, target + (size_t)y * target_stride +
-                                x * pixel_bytes, pixel_bytes,
-                                pen_color, 255);
+        } else {
+            GpuPaint paint;
+            uint32_t pen;
+
+            gpu_paint_setup(gpu, &paint);
+            pen = gpu_paint_source(&paint, pen_color);
+            for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
+                uint8_t *row = target + (size_t)y * target_stride;
+
+                if (left < right) {
+                    gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
+                                   left * pixel_bytes,
+                                   (right - left) * pixel_bytes);
+                }
+                GPU_FOR_EACH_FORMAT(paint.format, {
+                    for (x = left; x < right; x++) {
+                        gpu_paint_blend(&paint, fmt,
+                                        row + (size_t)x * pixel_bytes,
+                                        pen, 255);
+                    }
+                })
             }
         }
         gpu->rendered++;
@@ -1649,22 +1954,50 @@ static bool gpu_blit_index8(MiBandGpu *gpu, const uint8_t *rectangle)
                       gpu->states[0xa1e], gpu->states[0xa22]);
         return false;
     }
-    for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
-        if (left < right) {
-            gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
-                            left * pixel_bytes, (right - left) * pixel_bytes);
+    /* The changed count only feeds the first 32 completion logs. */
+    if (gpu->paint_reference || gpu->acknowledged < 32) {
+        for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
+            if (left < right) {
+                gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
+                                left * pixel_bytes, (right - left) * pixel_bytes);
+            }
+            for (x = left; x < right; x++) {
+                float u = (c0 + x0 * x + y0 * y) *
+                          (gpu->texture_texel_coordinates ? 1 : sw);
+                float v = (c1 + x1 * x + y1 * y) *
+                          (gpu->texture_texel_coordinates ? 1 : sh);
+                uint32_t src_color = gpu_sample_source(gpu, source, source_stride,
+                                                       sw, sh, u, v, source_kind);
+                uint8_t *dst = target + (size_t)y * target_stride +
+                               (size_t)x * pixel_bytes;
+                changed += gpu_paint_pixel(gpu, dst, pixel_bytes,
+                                            src_color, 255);
+            }
         }
-        for (x = left; x < right; x++) {
-            float u = (c0 + x0 * x + y0 * y) *
-                      (gpu->texture_texel_coordinates ? 1 : sw);
-            float v = (c1 + x1 * x + y1 * y) *
-                      (gpu->texture_texel_coordinates ? 1 : sh);
-            uint32_t src_color = gpu_sample_source(gpu, source, source_stride,
-                                                   sw, sh, u, v, source_kind);
-            uint8_t *dst = target + (size_t)y * target_stride +
-                           (size_t)x * pixel_bytes;
-            changed += gpu_paint_pixel(gpu, dst, pixel_bytes,
-                                        src_color, 255);
+    } else {
+        GpuPaint paint;
+
+        gpu_paint_setup(gpu, &paint);
+        for (y = MAX(0, ry); y < MIN((int)th, ry + rh); y++) {
+            uint8_t *row = target + (size_t)y * target_stride;
+
+            if (left < right) {
+                gpu_note_write(gpu, gpu->states[0xa11] + y * target_stride +
+                                left * pixel_bytes, (right - left) * pixel_bytes);
+            }
+            GPU_FOR_EACH_FORMAT(paint.format, {
+                for (x = left; x < right; x++) {
+                    float u = (c0 + x0 * x + y0 * y) *
+                              (gpu->texture_texel_coordinates ? 1 : sw);
+                    float v = (c1 + x1 * x + y1 * y) *
+                              (gpu->texture_texel_coordinates ? 1 : sh);
+                    uint32_t src_color = gpu_sample_source(
+                        gpu, source, source_stride, sw, sh, u, v, source_kind);
+
+                    gpu_paint_blend(&paint, fmt, row + (size_t)x * pixel_bytes,
+                                    gpu_paint_source(&paint, src_color), 255);
+                }
+            })
         }
     }
     if (gpu->acknowledged < 32) {
@@ -1678,6 +2011,79 @@ static bool gpu_blit_index8(MiBandGpu *gpu, const uint8_t *rectangle)
     }
     gpu->rendered++;
     return true;
+}
+
+static bool gpu_draw(MiBandGpu *gpu, const uint8_t *data, size_t length,
+                     bool rectangle)
+{
+    return rectangle ? gpu_blit_index8(gpu, data) :
+                       gpu_draw_path(gpu, data, length);
+}
+
+static bool gpu_verify_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_strcmp0(g_getenv("MIBAND_GPU_VERIFY"), "1") == 0;
+    }
+    /* Replay workers render private copies; verify only live drawing. */
+    return enabled && !g_private_get(&gpu_private_render);
+}
+
+/* MIBAND_GPU_VERIFY=1: render each draw with the original per-pixel paths,
+ * then with the fast paths from the same target bytes, and compare. The
+ * reference result is kept on mismatch so emulation output is unchanged. */
+static bool gpu_draw_verified(MiBandGpu *gpu, const uint8_t *data,
+                              size_t length, bool rectangle)
+{
+    static uint64_t draws, mismatches;
+    uint32_t height = gpu->states[0xa13] >> 16, stride;
+    unsigned rendered = gpu->rendered, path_rendered = gpu->path_rendered;
+    uint8_t *target = NULL, *before, *expected;
+    size_t bytes = 0;
+    bool reference_ok, fast_ok;
+
+    if (miband_gpu_target_layout(gpu->states[0xa10], gpu->states[0xa12], 0,
+                                 &stride) && height && height <= 1024) {
+        bytes = (size_t)stride * height;
+        target = gpu_target_ptr(gpu, gpu->states[0xa11], bytes);
+    }
+    if (!target) {
+        return gpu_draw(gpu, data, length, rectangle);
+    }
+    before = g_memdup2(target, bytes);
+    gpu->paint_reference = true;
+    reference_ok = gpu_draw(gpu, data, length, rectangle);
+    gpu->paint_reference = false;
+    expected = g_memdup2(target, bytes);
+    memcpy(target, before, bytes);
+    gpu->rendered = rendered;
+    gpu->path_rendered = path_rendered;
+    fast_ok = gpu_draw(gpu, data, length, rectangle);
+    draws++;
+    if (fast_ok != reference_ok || memcmp(target, expected, bytes)) {
+        size_t offset = 0;
+
+        while (offset < bytes && target[offset] == expected[offset]) {
+            offset++;
+        }
+        mismatches++;
+        qemu_log("miband GPU verify MISMATCH %s target=%08x format=%03x "
+                 "mode=%08x control=%08x offset=%zu stride=%u "
+                 "reference_ok=%u fast_ok=%u\n",
+                 rectangle ? "rect" : "path", gpu->states[0xa11],
+                 gpu->states[0xa10], gpu->states[0xa00], gpu->states[0xa34],
+                 offset, stride, reference_ok, fast_ok);
+        memcpy(target, expected, bytes);
+    }
+    if (draws % 1000 == 0 || mismatches == 1) {
+        qemu_log("miband GPU verify draws=%" PRIu64 " mismatches=%" PRIu64
+                 "\n", draws, mismatches);
+    }
+    g_free(before);
+    g_free(expected);
+    return reference_ok;
 }
 
 static bool gpu_run_stream(MiBandGpu *gpu, const uint8_t *commands,
@@ -1718,14 +2124,19 @@ static bool gpu_run_stream(MiBandGpu *gpu, const uint8_t *commands,
                 return false;
             }
             if (units == 1) {
-                if (!gpu_blit_index8(gpu, commands + offset + 8)) {
+                if (!(gpu_verify_enabled() ?
+                      gpu_draw_verified(gpu, commands + offset + 8, 8, true) :
+                      gpu_blit_index8(gpu, commands + offset + 8))) {
                     if (gpu->acknowledged < 32) qemu_log_mask(LOG_UNIMP,
                                   "miband GPU rejected rectangle at "
                                   "command offset %#zx\n", offset);
                     return false;
                 }
                 (*blits)++;
-            } else if (gpu_draw_path(gpu, commands + offset + 8,
+            } else if (gpu_verify_enabled() ?
+                       gpu_draw_verified(gpu, commands + offset + 8,
+                                         (size_t)units * 8, false) :
+                       gpu_draw_path(gpu, commands + offset + 8,
                                      (size_t)units * 8)) {
                 (*blits)++;
             } else {
@@ -1766,6 +2177,27 @@ static bool gpu_run_stream(MiBandGpu *gpu, const uint8_t *commands,
         }
     }
     return depth == 0;
+}
+
+/* MIBAND_GPU_TIMING_FILE: one CSV row per synchronous submit:
+ * realtime_begin_ns,duration_ns,command_units,rendered. */
+static void gpu_timing(int64_t begin, uint32_t units, bool rendered)
+{
+    static FILE *file;
+    static bool opened;
+
+    if (!opened) {
+        const char *path = g_getenv("MIBAND_GPU_TIMING_FILE");
+
+        opened = true;
+        file = path ? fopen(path, "w") : NULL;
+    }
+    if (file) {
+        fprintf(file, "%" PRId64 ",%" PRId64 ",%u,%u\n", begin,
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - begin, units,
+                rendered);
+        fflush(file);
+    }
 }
 
 static bool gpu_run_command(MiBandGpu *gpu)
@@ -2098,6 +2530,7 @@ bool miband_gpu_write(MiBandGpu *gpu, hwaddr address, unsigned size,
                     gpu->async->fallback_unverified++;
                 }
                 rendered_ok = gpu_run_command(gpu);
+                gpu_timing(begin, gpu->cmd_size, rendered_ok);
                 if (gpu->async) {
                     uint64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
                                        begin;

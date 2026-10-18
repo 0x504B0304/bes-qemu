@@ -1,0 +1,13 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "win32-timer-resolution.patch",
+  "patch_sha256": "7aa7078e9dffc6947feb71e88cf41a2441719770904daf9f544fa572feb19d40",
+  "files": [
+    {
+      "path": "os-win32.c",
+      "before_sha256": "c3fff4ff76dfbd0c21752dce3f4722cd131d89b4fe0e7b95747d116dc4b5b0ce",
+      "after_sha256": "b4a9cea34f76ae66d2fe8c2e02697de99f47079f9cfcb42a72368157bac7ac59"
+    }
+  ]
+}
