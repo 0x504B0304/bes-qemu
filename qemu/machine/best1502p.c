@@ -379,13 +379,23 @@ static void best1502p_restore(void *opaque, unsigned type, unsigned address,
                               const uint8_t *data, unsigned size)
 {
     Best1502pMachineState *s = opaque;
-    if (type == MB_STORE_PAGE) {
+    if (type == MB_STORE_NOR) {
+        /* Replay the seed and later NOR records into the shared flash backing.
+         * All XIP/cached/noncached aliases and the SPI reader use this buffer.
+         * The store validates record bounds before calling us. */
+        assert(address <= BEST1502P_FLASH_SIZE &&
+               size <= BEST1502P_FLASH_SIZE - address);
+        memcpy((uint8_t *)memory_region_get_ram_ptr(&s->flash) + address,
+               data, size);
+        memory_region_set_dirty(&s->flash, address, size);
+    } else if (type == MB_STORE_PAGE) {
         miband_nand_restore_page(s->nand, address, data, size);
     } else if (type == MB_STORE_ERASE) {
         miband_nand_restore_erase(s->nand, address);
     }
-    /* NOR is currently read-only. Its journal seed binds the AP contents;
-     * guest NOR writes remain unsupported rather than being acknowledged. */
+    /* Guest NOR writes remain unsupported rather than being acknowledged.
+     * Offline tools can update an exclusively locked journal; replaying those
+     * records must nevertheless expose the persisted bytes to the guest. */
 }
 
 static void best1502p_open_storage(Best1502pMachineState *s)
