@@ -53,6 +53,8 @@ typedef struct MiBandLcdc {
     unsigned diagnostic_writes;
     bool trace_control;
     bool frame_requested;
+    /* Synchronous mode: the requested frame was read at FRAME_START. */
+    bool frame_captured;
     QEMUTimer *frame_event;
     int64_t next_tick_ns;
     /* Nonzero completes a requested frame this long after FRAME_START

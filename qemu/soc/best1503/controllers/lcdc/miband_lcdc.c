@@ -733,6 +733,7 @@ void miband_lcdc_async_reset(MiBandLcdc *lcdc)
         async->cancelled++;
     }
     lcdc->frame_requested = false;
+    lcdc->frame_captured = false;
     lcdc->regs[LCDC_FRAME_START / 4] &= ~1u;
     lcdc->regs[LCDC_IRQ_STATUS / 4] &=
         ~(LCDC_TXC_FRAME_DONE | LCDC_SCANOUT_DONE);
@@ -973,12 +974,17 @@ void miband_lcdc_note_dma_write(MiBandLcdc *lcdc, uint32_t address,
     }
 }
 
-/* Commit a requested frame and latch frame-done once its source is ready. */
-static bool lcdc_complete_frame(MiBandLcdc *lcdc)
+/* Read a requested frame into the panel once its source is ready. The
+ * transfer starts at FRAME_START, so reading the buffer then keeps a guest
+ * that redraws the same buffer before frame-done from tearing the frame. */
+static bool lcdc_capture_frame(MiBandLcdc *lcdc)
 {
     uint32_t width, height, stride;
     unsigned pixel_bytes;
 
+    if (lcdc->frame_captured) {
+        return true;
+    }
     if (!lcdc->frame_requested ||
         lcdc->panel.status(lcdc->panel.opaque).sleeping ||
         (!lcdc->dma_frame_ready && lcdc->dma_in_progress) ||
@@ -988,6 +994,19 @@ static bool lcdc_complete_frame(MiBandLcdc *lcdc)
         return false;
     }
     lcdc_commit_frame(lcdc);
+    lcdc->frame_captured = true;
+    lcdc_timing(lcdc, "capture");
+    return true;
+}
+
+/* Latch frame-done for a captured frame, capturing it first if its source
+ * was not ready at FRAME_START. */
+static bool lcdc_complete_frame(MiBandLcdc *lcdc)
+{
+    if (!lcdc->frame_requested || !lcdc_capture_frame(lcdc)) {
+        return false;
+    }
+    lcdc->frame_captured = false;
     lcdc->frame_requested = false;
     lcdc->regs[LCDC_FRAME_START / 4] &= ~1u;
     lcdc->regs[LCDC_IRQ_STATUS / 4] |= LCDC_TXC_FRAME_DONE | LCDC_SCANOUT_DONE;
@@ -1236,6 +1255,9 @@ bool miband_lcdc_write(MiBandLcdc *lcdc, hwaddr address, unsigned size,
                           lcdc->regs[0xf4 / 4], lcdc_panel_visible(lcdc),
                           lcdc->dma_frame_ready,
                           qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+            if (!lcdc->async) {
+                lcdc_capture_frame(lcdc);
+            }
         }
         if (value >= 0x38000000 && value < 0x3e000000 &&
             lcdc->buffer_writes++ < lcdc_diagnostic_limit()) {

@@ -102,7 +102,8 @@ class Best1700LcdcQtest(unittest.TestCase):
         self.assertEqual(q.read32(LCDC + 0x224) & 1, 1)
         q.step(10_000_000)
         self.assertEqual(q.read32(LCDC + 0x1C4) & FRAME_DONE, 0)
-        self.assert_screenshot(BLACK)
+        # The source is read when the transfer starts; only frame-done waits.
+        self.assert_screenshot(expected)
         q.step(10_000_000)
         self.assertEqual(q.read32(LCDC + 0x1C4) & FRAME_DONE, FRAME_DONE)
         self.assertEqual(q.read32(LCDC + 0x224) & 1, 0)
