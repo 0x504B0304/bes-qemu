@@ -61,7 +61,7 @@ static void validate(MiBandStore *s,unsigned type,unsigned addr,unsigned size)
     if ((type==MB_STORE_NOR && size && addr<s->nor_bytes && size<=s->nor_bytes-addr) ||
         (type==MB_STORE_PAGE && addr<s->page_count && size==s->page_bytes) ||
         (type==MB_STORE_ERASE && addr<s->page_count/64 && !size) ||
-        (type==MB_STORE_MASS && addr <= 255 && size >= 26 && size <= MASS_MAX_BYTES)) return;
+        (type==MB_STORE_MASS && s->page_count && addr <= 255 && size >= 26 && size <= MASS_MAX_BYTES)) return;
     fail("invalid record type/address/length");
 }
 static void truncate_tail(int fd, off_t offset)
@@ -82,8 +82,10 @@ MiBandStore *miband_store_open_geometry(const char *path,const uint8_t base[32],
                              MiBandRestore restore,void *opaque)
 {
     if (!nor_bytes || nor_bytes > 0x1000000 || nor_bytes % 4096 ||
-        (page_bytes != PAGE_BYTES && page_bytes != 2176u) || !page_count || page_count > 0x1000000 ||
-        page_count % 64) fail("unsupported flash geometry");
+        !((!page_bytes && !page_count) ||
+          ((page_bytes == PAGE_BYTES || page_bytes == 2176u) && page_count &&
+           page_count <= 0x1000000 && !(page_count % 64))))
+        fail("unsupported flash geometry");
     MiBandStore *s=g_new0(MiBandStore,1);
     s->nor_bytes=nor_bytes;s->page_bytes=page_bytes;s->page_count=page_count;
     char *lock_path=g_strconcat(path,".lock",NULL);

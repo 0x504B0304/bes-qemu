@@ -18,6 +18,8 @@ int main(int argc,char **argv)
     unsigned nor_size = argc==4 ? 0x4000 : sizeof(nor);
     unsigned page_count = argc==4 ? 131072 : 262144;
     unsigned page_size = argc==4 ? 2176 : 2112;
+    int nor_only = argc==4 && !strcmp(argv[3], "nor-only");
+    if (nor_only) page_count = page_size = 0;
     MiBandStore *s = argc==4 ?
         miband_store_open_geometry(argv[2],base,nor,nor_size,page_size,page_count,restore,NULL) :
         miband_store_open(argv[2],base,nor,restore,NULL);
@@ -25,15 +27,20 @@ int main(int argc,char **argv)
         miband_store_append(s,MB_STORE_NOR,nor_size,(const uint8_t *)"x",1);
     if(!strcmp(argv[1],"badpage"))
         miband_store_append(s,MB_STORE_PAGE,page_count,page,page_size);
+    if(!strcmp(argv[1],"badmass"))
+        miband_store_append(s,MB_STORE_MASS,0,page,26);
     if(!strcmp(argv[1],"write")) {
         miband_store_append(s,MB_STORE_NOR,17,(const uint8_t *)"abc",3);
         miband_store_append(s,MB_STORE_NOR,nor_size-1,(const uint8_t *)"z",1);
-        memset(page,0x33,sizeof(page));miband_store_append(s,MB_STORE_PAGE,5,page,page_size);
-        miband_store_append(s,MB_STORE_ERASE,0,NULL,0);
-        memset(page,0xab,sizeof(page));miband_store_append(s,MB_STORE_PAGE,9,page,page_size);
+        if (!nor_only) {
+            memset(page,0x33,sizeof(page));miband_store_append(s,MB_STORE_PAGE,5,page,page_size);
+            miband_store_append(s,MB_STORE_ERASE,0,NULL,0);
+            memset(page,0xab,sizeof(page));miband_store_append(s,MB_STORE_PAGE,9,page,page_size);
+        }
         _exit(0); /* No close/atexit: every completed record must already persist. */
     }
-    assert(!memcmp(nor+17,"abc",3));assert(!present[5] && present[9]);
+    assert(!memcmp(nor+17,"abc",3));
+    if (!nor_only) assert(!present[5] && present[9]);
     assert(nor[nor_size-1]=='z');
     for(unsigned i=0;i<page_size;i++) assert(pages[9][i]==0xab);
     if(!strcmp(argv[1],"hold")) {puts("LOCKED");fflush(stdout);sleep(30);}

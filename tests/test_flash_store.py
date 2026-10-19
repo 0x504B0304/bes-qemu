@@ -43,4 +43,9 @@ with tempfile.TemporaryDirectory(prefix='miband-store-test-') as tmp:
     run('read',geometry='large-spare');assert state.read_bytes()==original
     corrupt=bytearray(original);corrupt[-1]^=1;state.write_bytes(corrupt)
     run('read',False,'large-spare')
-    print('PASS: durable NOR/NAND, erase ordering, base guard, lock, torn-tail recovery, corruption rejection')
+    state=tmp/'nor-only'
+    run('write',geometry='nor-only');run('read',geometry='nor-only')
+    assert struct.unpack_from('<III',state.read_bytes(),8)==(0x4000,0,0)
+    run('badpage',False,'nor-only');run('badmass',False,'nor-only')
+    run('badnor',False,'nor-only');run('read',False,'large-spare')
+    print('PASS: durable NOR/NAND and NOR-only windows, erase ordering, base guard, lock, torn-tail recovery, corruption rejection')

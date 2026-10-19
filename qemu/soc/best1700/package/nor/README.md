@@ -85,10 +85,27 @@ the same security address is sent to each die, with received bytes nibble
 interleaved as for other non-array commands. Main-array address halving and
 odd-byte skipping do not apply. Extended `48h` framing is unsupported.
 
-Persistence is currently limited to the running emulator process. Array and
-status updates are not written back to the input firmware files, and no
-external NOR persistence store is provided. A machine reset preserves the
-borrowed array and nonvolatile status; restarting QEMU restores input data.
+BTH array persistence is opt-in through the startup-only machine properties
+`bth-nor-state`, `bth-nor-state-offset`, and `bth-nor-state-size`. The last two
+select a nonempty, 4 KiB-aligned data window within the 16 MiB BTH flash. The
+window must start after the input BTH image; no firmware or product partition
+address is selected by the core. Without these properties, restarting QEMU
+still restores the original input image. SYS NOR and status-register
+persistence remain limited to the process.
+
+The selected window uses the existing locked, append-only `MBFLASH1` journal
+with NOR geometry `(size, 0, 0)`; NAND/MASS records are rejected. Initial bytes
+and bounded NOR deltas are checksummed, and each accepted program/erase is
+durably synced before its controller callback returns. Bytes outside the
+window are not persisted. Input firmware files remain read-only. The journal
+identity is SHA-256 of `best1700-bth-nor-v1` followed by a zero byte, the exact
+BTH input image bytes, and little-endian uint32 offset and size. Changing the
+image or window refuses to replay an old journal. Offline tools must acquire
+the same `<journal>.lock` and validate identity/geometry before merging data.
+
+`tests.test_best1700_nor_persistence_qtest` exercises actual controller
+program/erase, all BTH aliases, process restart, window isolation, source and
+geometry mismatch, and the second-process lock using synthetic inputs.
 
 `tests.test_best1700_nor_native` compiles the standalone die test with address
 and undefined-behavior sanitizers. It verifies identity, WEL/WIP, reset and

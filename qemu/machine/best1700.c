@@ -75,6 +75,7 @@
 #include "miband_emmc.h"
 #include "cw221x.h"
 #include "sc89620.h"
+#include "miband_store.h"
 
 #define TYPE_MIBAND_BEST1700 MACHINE_TYPE_NAME("miband-best1700")
 OBJECT_DECLARE_SIMPLE_TYPE(Best1700MachineState, MIBAND_BEST1700)
@@ -194,6 +195,9 @@ typedef struct Best1700Core {
     MemoryRegion space;
     AddressSpace address_space;
     AddressSpace flash_storage_as;
+    MiBandStore *nor_store;
+    uint32_t nor_store_offset;
+    uint32_t nor_store_size;
     Best1700SecState *dma_sec;
     qemu_irq dma_irq[2];
     QEMUTimer *dma_timer;
@@ -400,6 +404,9 @@ struct Best1700MachineState {
     Clock *refclk;
     char *cp_image;
     char *bth_image;
+    char *bth_nor_state;
+    uint32_t bth_nor_state_offset;
+    uint32_t bth_nor_state_size;
     char *tee_image;
     char *audio_image;
     char *audio_endpoint_profile;
@@ -2911,6 +2918,12 @@ static uint32_t *best1700_image_property(Best1700MachineState *s,
     if (!strcmp(name, "doorbell-base")) {
         return &s->doorbell_base;
     }
+    if (!strcmp(name, "bth-nor-state-offset")) {
+        return &s->bth_nor_state_offset;
+    }
+    if (!strcmp(name, "bth-nor-state-size")) {
+        return &s->bth_nor_state_size;
+    }
     return NULL;
 }
 
@@ -2966,6 +2979,18 @@ static void best1700_nor_changed(void *opaque, uint64_t offset, uint64_t length)
 
     g_assert(offset <= BEST1700_FLASH_SIZE &&
              length <= BEST1700_FLASH_SIZE - offset);
+    if (core->nor_store) {
+        uint64_t first = MAX(offset, core->nor_store_offset);
+        uint64_t last = MIN(offset + length,
+                           (uint64_t)core->nor_store_offset + core->nor_store_size);
+        if (first < last) {
+            /* The existing append store locks, checksums and durably syncs
+             * each committed operation. Only the configured data window is
+             * persisted; a store can never replay over the input program. */
+            miband_store_append(core->nor_store, MB_STORE_NOR,
+                first - core->nor_store_offset, backing + first, last - first);
+        }
+    }
     /* The die has already committed program/erase to its borrowed backing.
      * Re-publish through the ROM write API to dirty pages and invalidate
      * translated instructions in every alias. This is an internal die update,
@@ -2979,6 +3004,76 @@ static void best1700_nor_changed(void *opaque, uint64_t offset, uint64_t length)
         offset += count;
         length -= count;
     }
+}
+
+static char *best1700_get_bth_nor_state(Object *obj, Error **errp)
+{
+    return g_strdup(MIBAND_BEST1700(obj)->bth_nor_state);
+}
+
+static void best1700_set_bth_nor_state(Object *obj, const char *value, Error **errp)
+{
+    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    if (s->workers_started) {
+        error_setg(errp, "bth-nor-state is startup-only");
+        return;
+    }
+    g_free(s->bth_nor_state);
+    s->bth_nor_state = g_strdup(value);
+}
+
+static void best1700_restore_bth_nor(void *opaque, unsigned type,
+                                    unsigned address, const uint8_t *data,
+                                    unsigned size)
+{
+    Best1700Core *core = opaque;
+    if (type != MB_STORE_NOR || address > core->nor_store_size ||
+        size > core->nor_store_size - address) {
+        error_report("BTH NOR store contains a non-NOR or out-of-range record");
+        exit(EXIT_FAILURE);
+    }
+    memcpy((uint8_t *)memory_region_get_ram_ptr(&core->flash) +
+           core->nor_store_offset + address, data, size);
+    memory_region_set_dirty(&core->flash, core->nor_store_offset + address, size);
+}
+
+static void best1700_open_bth_nor(Best1700MachineState *s)
+{
+    Best1700Core *core = &s->core[2];
+    uint32_t offset = s->bth_nor_state_offset, size = s->bth_nor_state_size;
+    g_autofree char *image = NULL;
+    gsize image_size = 0, digest_size = 32;
+    uint8_t digest[32], geometry[8];
+    if (!s->bth_nor_state || !*s->bth_nor_state) {
+        if (offset || size) {
+            error_report("BTH NOR geometry requires bth-nor-state");
+            exit(EXIT_FAILURE);
+        }
+        return;
+    }
+    if (!s->bth_image || !size || ((offset | size) & 4095) ||
+        offset >= BEST1700_FLASH_SIZE || size > BEST1700_FLASH_SIZE - offset ||
+        !g_file_get_contents(s->bth_image, &image, &image_size, NULL) ||
+        offset < (uint64_t)s->image_code_offset[2] + image_size) {
+        error_report("invalid BTH NOR state geometry or overlap with firmware image");
+        exit(EXIT_FAILURE);
+    }
+    /* Bind both source firmware and layout. The domain terminator is part of
+     * the digest; this formula is also used by stopped-instance tooling. */
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    static const char domain[] = "best1700-bth-nor-v1";
+    stl_le_p(geometry, offset);
+    stl_le_p(geometry + 4, size);
+    g_checksum_update(sum, (const guchar *)domain, sizeof(domain));
+    g_checksum_update(sum, (const guchar *)image, image_size);
+    g_checksum_update(sum, geometry, sizeof(geometry));
+    g_checksum_get_digest(sum, digest, &digest_size);
+    g_checksum_free(sum);
+    core->nor_store_offset = offset;
+    core->nor_store_size = size;
+    core->nor_store = miband_store_open_geometry(s->bth_nor_state, digest,
+        (const uint8_t *)memory_region_get_ram_ptr(&core->flash) + offset,
+        size, 0, 0, best1700_restore_bth_nor, core);
 }
 
 static void best1700_btc_alias(Best1700MachineState *s, MemoryRegion *view,
@@ -3602,6 +3697,7 @@ static void best1700_init(MachineState *machine)
                        s->image_code_offset[2],
                        BEST1700_RAM_BASE + BEST1700_RAM_SIZE - 16,
                        BEST1700_STUB_PC, false);
+    best1700_open_bth_nor(s);
     if (s->bth_real_boot) {
         /*
          * BTH owns two DMA instances. Their register blocks share the
@@ -3937,6 +4033,7 @@ static void best1700_machine_class_init(ObjectClass *oc, void *data)
         "ap-flash-base", "ap-code-offset", "ap-entry",
         "cp-flash-base", "cp-code-offset", "cp-entry",
         "bth-flash-base", "bth-code-offset", "bth-entry",
+        "bth-nor-state-offset", "bth-nor-state-size",
         "tee-flash-base", "tee-code-offset", "tee-entry",
         "shared-base", "doorbell-base",
     };
@@ -3984,6 +4081,8 @@ static void best1700_machine_class_init(ObjectClass *oc, void *data)
                                   best1700_set_cp_image);
     object_class_property_add_str(oc, "bth-image", best1700_get_bth_image,
                                   best1700_set_bth_image);
+    object_class_property_add_str(oc, "bth-nor-state", best1700_get_bth_nor_state,
+                                  best1700_set_bth_nor_state);
     object_class_property_add_str(oc, "tee-image", best1700_get_tee_image,
                                   best1700_set_tee_image);
     object_class_property_add_str(oc, "audio-image", best1700_get_audio_image,
@@ -4030,6 +4129,8 @@ static void best1700_instance_finalize(Object *obj)
         qemu_free_irqs(s->bth_irq, G_N_ELEMENTS(s->bth_irq_level));
     }
     g_free(s->audio_endpoint_profile);
+    miband_store_close(s->core[2].nor_store);
+    g_free(s->bth_nor_state);
 }
 
 static const TypeInfo best1700_machine_type = {

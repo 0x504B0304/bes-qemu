@@ -9,7 +9,8 @@ typedef void (*MiBandRestore)(void *, unsigned, unsigned, const uint8_t *, unsig
 MiBandStore *miband_store_open(const char *, const uint8_t[32], const uint8_t *,
                              MiBandRestore, void *);
 /* MBFLASH1 records carry geometry in the header; erase addresses are 64-page
- * block indices. The legacy entry point retains its original geometry. */
+ * block indices. Zero page_bytes/page_count selects a NOR-only store and
+ * rejects all NAND/MASS records. The legacy entry point retains its geometry. */
 MiBandStore *miband_store_open_geometry(const char *, const uint8_t[32],
                                       const uint8_t *, unsigned, unsigned,
                                       unsigned, MiBandRestore, void *);
