@@ -28,6 +28,7 @@
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "best1502p_nor.h"
 #include "best1502p_timer.h"
 #include "best1502p_ispi.h"
@@ -48,6 +49,7 @@
 #include "miband_touch_input.h"
 #include "miband_binding_ui.h"
 #include "miband_charger.h"
+#include "miband_bt.h"
 
 #define BEST1502P_XIP_BASE       0x0c000000u
 #define BEST1502P_NC_BASE        0x28000000u
@@ -135,6 +137,11 @@ struct Best1502pMachineState {
     MemoryRegion psram_c;
     MemoryRegion psram_x;
     MemoryRegion bt_ram;
+    MiBandBt bt;
+    char *bt_backend;
+    bool bt_enabled;
+    bool bt_initial_reset_seen;
+    Notifier bt_exit;
     MemoryRegion btc_ram;
     MemoryRegion bt_cpudump;
     Best1502pMmio bt_regs_state;
@@ -546,6 +553,14 @@ static uint64_t best1502p_mmio_read(void *opaque, hwaddr offset,
     uint32_t value = index < ARRAY_SIZE(mmio->words) ? mmio->words[index] : 0;
     uint64_t gpio_value;
 
+    if (mmio->machine->bt_enabled &&
+        (miband_bt_mailbox_read(&mmio->machine->bt, mmio->base + offset,
+                               size, &gpio_value) ||
+         miband_bt_read(&mmio->machine->bt, mmio->base + offset,
+                        size, &gpio_value))) {
+        return gpio_value;
+    }
+
     if (miband_i2c_read(mmio->machine->touch_i2c, mmio->base + offset,
                         size, &gpio_value)) {
         return gpio_value;
@@ -589,6 +604,14 @@ static void best1502p_mmio_write(void *opaque, hwaddr offset,
 {
     Best1502pMmio *mmio = opaque;
     uint32_t index = offset >> 2;
+
+    if (mmio->machine->bt_enabled &&
+        (miband_bt_mailbox_write(&mmio->machine->bt, mmio->base + offset,
+                                size, value) ||
+         miband_bt_write(&mmio->machine->bt, mmio->base + offset,
+                         size, value))) {
+        return;
+    }
 
     if (miband_i2c_write(mmio->machine->touch_i2c, mmio->base + offset,
                          size, value)) {
@@ -968,6 +991,46 @@ static char *best1502p_get_firmware(Object *obj, Error **errp)
     return g_strdup(BEST1502P_MACHINE(obj)->firmware_profile);
 }
 
+static char *best1502p_get_bt_backend(Object *obj, Error **errp)
+{
+    /* Session credentials are startup-only; never return them through QOM. */
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    return g_strdup(!s->bt_enabled ? "disabled" :
+                    s->bt.host_requested ? "physical" : "synthetic");
+}
+
+static void best1502p_bt_exit(Notifier *notifier, void *data)
+{
+    Best1502pMachineState *s = container_of(notifier, Best1502pMachineState, bt_exit);
+    miband_bt_shutdown(&s->bt);
+}
+
+static void best1502p_bt_reset(void *opaque)
+{
+    Best1502pMachineState *s = opaque;
+    if (!s->bt_initial_reset_seen) {
+        s->bt_initial_reset_seen = true;
+        return;
+    }
+    /* A controller/session belongs to one launch. Never let the guest reuse
+     * live connections and stale mailbox state after resetting its host. */
+    vm_stop(RUN_STATE_SHUTDOWN);
+    miband_bt_shutdown(&s->bt);
+    error_report("best1502p: reset invalidated HCI session; restart the instance");
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
+static void best1502p_set_bt_backend(Object *obj, const char *value, Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "bt-backend is startup-only");
+        return;
+    }
+    g_free(s->bt_backend);
+    s->bt_backend = g_strdup(value);
+}
+
 static void best1502p_set_firmware(Object *obj, const char *value, Error **errp)
 {
     Best1502pMachineState *s = BEST1502P_MACHINE(obj);
@@ -1251,6 +1314,28 @@ static void best1502p_init(MachineState *machine)
     object_property_set_link(OBJECT(&s->armv7m), "memory",
                              OBJECT(sysmem), &error_fatal);
     sysbus_realize(SYS_BUS_DEVICE(&s->armv7m), &error_fatal);
+    if (s->bt_backend) {
+        /* BEST1502P retains the BES1503 intersys register/descriptor ABI;
+         * reference best1503.c wires TX32/33 and RX34/35 for both SoCs.
+         * Its extra SRAM banks extend the valid descriptor range to 2 MiB. */
+        miband_bt_init(&s->bt, &address_space_memory,
+                       memory_region_get_ram_ptr(&s->bt_ram));
+        s->bt.ap_ram_end = BEST1502P_RAM_BASE + BEST1502P_RAM_SIZE;
+        s->bt.control_channel_one = true;
+        miband_bt_set_synthetic_peer_passive(&s->bt, true);
+        for (unsigned ch = 0; ch < 2; ch++) {
+            miband_bt_connect_tx_irq(&s->bt, ch,
+                qdev_get_gpio_in(armv7m, 32 + ch));
+            miband_bt_connect_rx_irq(&s->bt, ch,
+                qdev_get_gpio_in(armv7m, 34 + ch));
+        }
+        miband_bt_set_backend(&s->bt, s->bt_backend);
+        s->bt_enabled = true;
+        s->bt_exit.notify = best1502p_bt_exit;
+        qemu_add_exit_notifier(&s->bt_exit);
+        qemu_register_reset(best1502p_bt_reset, s);
+        g_clear_pointer(&s->bt_backend, g_free);
+    }
     /* BES AP I2C routing, also recorded by qemu-miwear best1503.c.
      * I2C7's route is unqualified; retain MMIO without guessing its IRQ. */
     static const unsigned i2c_irqs[] = { 14, 29, 64, 65, 53, 54, 55 };
@@ -1296,6 +1381,8 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
     };
     MachineClass *mc = MACHINE_CLASS(oc);
     bes_runtime_config_property(oc);
+    object_class_property_add_str(oc, "bt-backend", best1502p_get_bt_backend,
+                                  best1502p_set_bt_backend);
 
     mc->desc = "BES best1502p AP bring-up machine (Cortex-M33)";
     mc->init = best1502p_init;

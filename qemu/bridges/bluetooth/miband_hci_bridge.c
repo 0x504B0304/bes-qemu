@@ -4,17 +4,20 @@
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/timer.h"
+#include "qemu/sockets.h"
 #include "miband_hci_bridge.h"
 #include <errno.h>
 #include <fcntl.h>
 #ifndef _WIN32
 #include <sys/socket.h>
+#include <netdb.h>
 #include <termios.h>
 #ifdef __APPLE__
 #include <IOKit/serial/ioss.h>
 #include <sys/ioctl.h>
 #endif
 #else
+#include <winsock2.h>
 #include <windows.h>
 #include <io.h>
 #endif
@@ -37,7 +40,7 @@ struct miband_sockaddr_hci {
 struct MiBandHciBridge {
     MiBandHciBridgeCallbacks callbacks;
     int host_fd;
-    bool host_active, serial_active, strict_rx;
+    bool host_active, serial_active, proxy_active, strict_rx;
     uint8_t serial_rx[8192];
     unsigned serial_rx_len;
     uint8_t host_tx[MIBAND_BT_HOST_TX_QUEUE_LENGTH][MIBAND_BT_PACKET_MAX];
@@ -48,6 +51,20 @@ struct MiBandHciBridge {
     QEMUTimer *serial_tx_timer;
 };
 static bool miband_hci_bridge_flush(MiBandHciBridge *bridge);
+static ssize_t bridge_stream_write(MiBandHciBridge *bridge, const uint8_t *data, unsigned size)
+{
+    if (bridge->proxy_active) {
+        return send(bridge->host_fd, data, size, 0);
+    }
+    return write(bridge->host_fd, data, size);
+}
+static ssize_t bridge_stream_read(MiBandHciBridge *bridge, uint8_t *data, unsigned size)
+{
+    if (bridge->proxy_active) {
+        return recv(bridge->host_fd, data, size, 0);
+    }
+    return read(bridge->host_fd, data, size);
+}
 static void bridge_read_ready(void *opaque)
 {
     MiBandHciBridge *bridge = opaque;
@@ -79,7 +96,7 @@ void miband_hci_bridge_close(MiBandHciBridge *bridge)
         close(bridge->host_fd);
         bridge->host_fd = -1;
     }
-    bridge->host_active = bridge->serial_active = false;
+    bridge->host_active = bridge->serial_active = bridge->proxy_active = false;
     bridge->host_tx_head = bridge->host_tx_count = bridge->host_tx_offset = 0;
     bridge->serial_rx_len = 0;
     bridge->serial_tx_next_ns = 0;
@@ -95,6 +112,10 @@ void miband_hci_bridge_free(MiBandHciBridge *bridge)
 void miband_hci_bridge_set_rate(MiBandHciBridge *bridge, unsigned rate)
 {
     bridge->serial_tx_rate = rate;
+}
+bool miband_hci_bridge_is_proxy(const MiBandHciBridge *bridge)
+{
+    return bridge && bridge->proxy_active;
 }
 void miband_hci_bridge_set_strict_rx(MiBandHciBridge *bridge, bool strict)
 {
@@ -133,7 +154,7 @@ static bool miband_hci_bridge_flush(MiBandHciBridge *bridge)
         }
 
         if (bridge->serial_active) {
-            sent = write(bridge->host_fd,
+            sent = bridge_stream_write(bridge,
                          bridge->host_tx[head] + bridge->host_tx_offset, remaining);
         } else {
 #ifdef __linux__
@@ -239,6 +260,71 @@ bool miband_hci_bridge_open_host(MiBandHciBridge *bridge, unsigned dev)
     qemu_log_mask(LOG_UNIMP, "miband BT host backend active hci%u\n", dev);
     return true;
 #endif
+}
+
+static bool bridge_hex_field(const char *value, size_t length)
+{
+    if (!value || strlen(value) != length) return false;
+    for (size_t i = 0; i < length; ++i) {
+        if (!g_ascii_isxdigit(value[i])) return false;
+    }
+    return true;
+}
+
+bool miband_hci_bridge_open_proxy(MiBandHciBridge *bridge, const char *endpoint)
+{
+    /* QEMU's socket wrappers map Windows SOCKETs to CRT descriptors. Never
+     * cast SOCKET into int or pass a CRT descriptor to closesocket. */
+    g_auto(GStrv) fields = g_strsplit(endpoint, "|", -1);
+    const char *address = fields[0];
+    unsigned count = g_strv_length(fields);
+    unsigned port;
+    char *end;
+    int fd;
+    if (!address || !g_str_has_prefix(address, "tcp://127.0.0.1:")) return false;
+    const char *number = address + strlen("tcp://127.0.0.1:");
+    if (!g_ascii_isdigit(*number)) return false;
+    errno = 0;
+    port = strtoul(number, &end, 10);
+    if (errno || *end || !port || port > 65535) return false;
+    if (count != 1 && (count != 4 || !bridge_hex_field(fields[1], 32) ||
+                      !bridge_hex_field(fields[2], 32) ||
+                      !bridge_hex_field(fields[3], 64))) return false;
+    fd = inet_connect(address + 6, NULL);
+    if (fd < 0) return false;
+    socket_set_nodelay(fd);
+    if (count == 4) {
+        g_autofree char *hello = g_strdup_printf("BES-HCI/2 %s %s %s\n",
+                                                fields[1], fields[2], fields[3]);
+        const char expected[] = "BES-HCI/2 OK\n";
+        char reply[sizeof(expected) - 1];
+        size_t used = 0;
+#ifdef _WIN32
+        DWORD timeout = 2000;
+#else
+        struct timeval timeout = { .tv_sec = 2 };
+#endif
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout)) ||
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const void *)&timeout, sizeof(timeout)) ||
+            qemu_send_full(fd, hello, strlen(hello)) != strlen(hello)) {
+            close(fd); return false;
+        }
+        while (used < sizeof(reply)) {
+            ssize_t n = recv(fd, reply + used, sizeof(reply) - used, 0);
+            if (n <= 0) { close(fd); return false; }
+            used += n;
+        }
+        if (memcmp(reply, expected, sizeof(reply))) { close(fd); return false; }
+    }
+    qemu_socket_set_nonblock(fd);
+    miband_hci_bridge_close(bridge);
+    bridge->host_fd = fd;
+    bridge->host_active = bridge->serial_active = bridge->proxy_active = true;
+    bridge->serial_rx_len = 0;
+    qemu_set_fd_handler(fd, bridge_read_ready, NULL, bridge);
+    /* Tickets and endpoint identities must not enter diagnostic logs. */
+    qemu_log_mask(LOG_UNIMP, "miband BT HCI bridge connected\n");
+    return true;
 }
 
 #ifndef _WIN32
@@ -404,7 +490,7 @@ unsigned miband_hci_bridge_next_packet(MiBandHciBridge *bridge, uint8_t *packet)
             return length;
         }
         uint8_t input[512];
-        ssize_t received = read(bridge->host_fd, input, sizeof(input));
+        ssize_t received = bridge_stream_read(bridge, input, sizeof(input));
         if (received <= 0) {
             if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
             qemu_log_mask(LOG_UNIMP, "miband BT serial read failed errno=%d\n", errno);

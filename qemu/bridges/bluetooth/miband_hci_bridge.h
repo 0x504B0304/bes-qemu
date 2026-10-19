@@ -16,6 +16,8 @@ void miband_hci_bridge_close(MiBandHciBridge *bridge);
 void miband_hci_bridge_free(MiBandHciBridge *bridge);
 bool miband_hci_bridge_open_serial(MiBandHciBridge *bridge, const char *path, unsigned baud);
 bool miband_hci_bridge_open_host(MiBandHciBridge *bridge, unsigned dev);
+bool miband_hci_bridge_open_proxy(MiBandHciBridge *bridge, const char *endpoint);
+bool miband_hci_bridge_is_proxy(const MiBandHciBridge *bridge);
 void miband_hci_bridge_set_rate(MiBandHciBridge *bridge, unsigned bytes_per_second);
 void miband_hci_bridge_set_strict_rx(MiBandHciBridge *bridge, bool strict);
 bool miband_hci_bridge_queue(MiBandHciBridge *bridge, const uint8_t *data, unsigned size);

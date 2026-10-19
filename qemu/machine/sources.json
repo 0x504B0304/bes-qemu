@@ -199,6 +199,8 @@
     "qemu/board-devices/assembly/power/guest_power.c",
     "qemu/machine/bes_runtime_config.c",
     "qemu/machine/bes_runtime_config.h",
-    "qemu/persistence/bes_host_file.h"
+    "qemu/persistence/bes_host_file.h",
+    "qemu/soc/best1700/include/best1700_hci_router.h",
+    "qemu/soc/best1700/controllers/ipc/best1700_hci_router.c"
   ]
 }

@@ -56,11 +56,23 @@ struct Best1700BtcIpc {
     Best1700BtcIpcBank bank_context[BEST1700_BTC_IPC_BANKS];
     void *wake_opaque;
     void (*wake)(void *opaque, bool level);
+    /* Optional read-only observer of new doorbells. Never owns/acks a lane. */
+    void *observe_opaque;
+    void (*observe)(void *opaque, Best1700BtcIpcSide side, unsigned lane);
+    /* Optional external endpoint. Its RX latch is distinct from the native
+     * peer's IND/DONE: acknowledging it must never complete a BTC TX. */
+    uint8_t external_rx[BEST1700_BTC_IPC_SIDES];
+    void *external_opaque;
+    void (*external_changed)(void *opaque);
 };
 
 void best1700_btc_ipc_init(Best1700BtcIpc *s, Object *owner);
 void best1700_btc_ipc_reset(Best1700BtcIpc *s);
 void best1700_btc_ipc_refresh(Best1700BtcIpc *s);
+void best1700_btc_ipc_take_tx(Best1700BtcIpc *s,
+                             Best1700BtcIpcSide side, unsigned lane);
+void best1700_btc_ipc_raise_external(Best1700BtcIpc *s,
+                                    Best1700BtcIpcSide side, unsigned lane);
 void best1700_btc_ipc_connect_wake(Best1700BtcIpc *s, void *opaque,
                                   void (*wake)(void *opaque, bool level));
 void best1700_btc_ipc_connect_irq(Best1700BtcIpc *s,

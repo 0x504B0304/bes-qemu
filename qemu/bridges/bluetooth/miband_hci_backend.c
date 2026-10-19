@@ -61,6 +61,22 @@ bool miband_hci_backend_parse(const char *spec, MiBandHciBackendConfig *config,
         }
         return true;
     }
+    if (g_str_has_prefix(spec, "host-bridge:") ||
+        g_str_has_prefix(spec, "host-bridge-v2:")) {
+        if (g_str_has_prefix(spec, "host-bridge-v2:") &&
+            !strchr(spec, '|')) {
+            error_setg(errp, "authenticated HCI bridge requires a session");
+            return false;
+        }
+        config->kind = MIBAND_HCI_PROXY;
+        config->dual_mode = true;
+        config->path = g_strdup(strchr(spec, ':') + 1);
+        if (!config->path[0]) {
+            error_setg(errp, "miband BT host bridge endpoint is empty");
+            return false;
+        }
+        return true;
+    }
     error_setg(errp, "miband BT unknown backend=%s", spec);
     return false;
 }

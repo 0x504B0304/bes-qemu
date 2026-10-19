@@ -122,7 +122,7 @@ static void btc_ipc_update_irqs(Best1700BtcIpc *s)
     }
     for (unsigned side = 0; side < BEST1700_BTC_IPC_SIDES; side++) {
         Best1700BtcIpcPort *p = &s->port[side];
-        uint8_t rx = s->port[side ^ 1].ind & p->rx_mask;
+        uint8_t rx = (s->port[side ^ 1].ind | s->external_rx[side]) & p->rx_mask;
         uint8_t done = p->done & p->done_mask;
 
         for (unsigned lane = 0; lane < BEST1700_BTC_IPC_LANES; lane++) {
@@ -135,10 +135,10 @@ static void btc_ipc_update_irqs(Best1700BtcIpc *s)
 static uint32_t btc_ipc_read_fields(Best1700BtcIpc *s, const BtcIpcLayout *r)
 {
     Best1700BtcIpcPort *p = &s->port[r->side];
-    uint8_t rx = s->port[r->side ^ 1].ind;
+    uint8_t rx = s->port[r->side ^ 1].ind | s->external_rx[r->side];
 
     return btc_ipc_field(r, p->done, r->done) |
-        btc_ipc_field(r, p->ind, r->ind) |
+        btc_ipc_field(r, p->ind | s->external_rx[r->side ^ 1], r->ind) |
         btc_ipc_field(r, p->rx_mask, r->rx_mask) |
         btc_ipc_field(r, p->done_mask, r->done_mask) |
         btc_ipc_field(r, rx, r->raw_rx) |
@@ -170,6 +170,11 @@ static void btc_ipc_write_fields(Best1700BtcIpc *s, const BtcIpcLayout *r,
     uint8_t done_mask = btc_ipc_extract(r, value, r->done_mask);
 
     if (r->clear) {
+        /* The visible external response owns this acknowledgment. Preserve
+         * a concurrently pending native response and its TX completion. */
+        uint8_t external = s->external_rx[r->side ^ 1] & ind;
+        s->external_rx[r->side ^ 1] &= ~external;
+        ind &= ~external;
         uint8_t completed = p->ind & ind;
 
         p->ind &= ~ind;
@@ -212,6 +217,11 @@ static MemTxResult btc_ipc_write_register(Best1700BtcIpcBank *bank,
     size_t count;
     const BtcIpcLayout *layout = btc_ipc_layout(bank->id, &count);
     uint32_t supported = 0;
+    uint8_t old_ind[BEST1700_BTC_IPC_SIDES];
+
+    for (unsigned i = 0; i < BEST1700_BTC_IPC_SIDES; i++) {
+        old_ind[i] = bank->controller->port[i].ind;
+    }
 
     for (unsigned i = 0; i < count; i++) {
         if (layout[i].offset == offset) {
@@ -241,6 +251,20 @@ static MemTxResult btc_ipc_write_register(Best1700BtcIpcBank *bank,
         bank->controller->core_wakeup = offset == 0x50;
     }
     /* Empty clears and mask initialization cannot create completions. */
+    if (bank->controller->observe) {
+        for (unsigned side = 0; side < BEST1700_BTC_IPC_SIDES; side++) {
+            uint8_t added = bank->controller->port[side].ind & ~old_ind[side];
+            for (unsigned lane = 0; lane < BEST1700_BTC_IPC_LANES; lane++) {
+                if (added & (1u << lane)) {
+                    bank->controller->observe(bank->controller->observe_opaque,
+                                               side, lane);
+                }
+            }
+        }
+    }
+    if (bank->controller->external_changed) {
+        bank->controller->external_changed(bank->controller->external_opaque);
+    }
     btc_ipc_update_irqs(bank->controller);
     return MEMTX_OK;
 }
@@ -366,6 +390,7 @@ void best1700_btc_ipc_reset(Best1700BtcIpc *s)
         p->done = 0;
         p->rx_mask = 0;
         p->done_mask = 0;
+        s->external_rx[side] = 0;
     }
     /* Reset is not a peer receive acknowledgment. */
     btc_ipc_update_irqs(s);
@@ -373,6 +398,24 @@ void best1700_btc_ipc_reset(Best1700BtcIpc *s)
 
 void best1700_btc_ipc_refresh(Best1700BtcIpc *s)
 {
+    btc_ipc_update_irqs(s);
+}
+
+void best1700_btc_ipc_take_tx(Best1700BtcIpc *s,
+                             Best1700BtcIpcSide side, unsigned lane)
+{
+    uint8_t bit = 1u << lane;
+    assert(side < BEST1700_BTC_IPC_SIDES && lane < BEST1700_BTC_IPC_LANES);
+    assert(s->port[side].ind & bit);
+    s->port[side].ind &= ~bit;
+    s->port[side].done |= bit;
+}
+
+void best1700_btc_ipc_raise_external(Best1700BtcIpc *s,
+                                    Best1700BtcIpcSide side, unsigned lane)
+{
+    assert(side < BEST1700_BTC_IPC_SIDES && lane < BEST1700_BTC_IPC_LANES);
+    s->external_rx[side] |= 1u << lane;
     btc_ipc_update_irqs(s);
 }
 

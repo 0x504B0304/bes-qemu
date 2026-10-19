@@ -948,7 +948,8 @@ void miband_bt_start_serial_worker(MiBandBt *bt, CPUState *cpu,
     MiBandSerialMain *m;
     MiBandSerialStats stats;
     char error[200];
-    if (!bt->serial_active || bt->serial_worker) {
+    if (!bt->serial_active || bt->serial_worker ||
+        miband_hci_bridge_is_proxy(bt->bridge)) {
         return;
     }
     assert(cpu || qtest_enabled());
@@ -1030,7 +1031,7 @@ static bool miband_bt_guest_read(MiBandBt *bt, uint32_t address,
 {
     /* IPC descriptors live in AP RAM; packet data can also live in PSRAM. */
     if (!((address >= 0x20000000 &&
-           (uint64_t)address + size <= 0x20160000) ||
+           (uint64_t)address + size <= bt->ap_ram_end) ||
           (address >= 0x3c000000 &&
            (uint64_t)address + size <= 0x3e000000))) {
         return false;
@@ -1220,7 +1221,8 @@ static bool miband_bt_forward_host(MiBandBt *bt, unsigned channel,
                                    uint16_t opcode, const uint8_t *data,
                                    unsigned size)
 {
-    if (!bt->host_active || miband_bt_is_vendor_command(opcode) ||
+    if (!bt->host_active || (miband_bt_is_vendor_command(opcode) &&
+                            !miband_hci_bridge_is_proxy(bt->bridge)) ||
         (bt->serial_active && !bt->serial_dual_mode &&
          !miband_bt_serial_forwards_command(opcode))) {
         if (bt->serial_active && !bt->serial_dual_mode &&
@@ -1263,6 +1265,16 @@ static void miband_bt_command(MiBandBt *bt, unsigned channel,
     uint8_t params[256];
     unsigned params_len = 0;
     const char *action = "unsupported";
+
+    /* BEST1502P channel one carries {user,msg}, not an H4 packet.
+     * The transport consumes the notification without inventing an HCI
+     * completion. Controller power polling remains independently observable. */
+    if (bt->control_channel_one && channel == 1) {
+        if (size != 8) {
+            error_setg(&error_fatal, "invalid BT control mailbox length");
+        }
+        return;
+    }
 
     if (size && data[0] == 0x02 &&
         size <= sizeof(bt->synthetic_last_ap_packet)) {
@@ -1657,6 +1669,7 @@ void miband_bt_init(MiBandBt *bt, AddressSpace *as, uint8_t *ram)
     memset(bt, 0, sizeof(*bt));
     bt->as = as;
     bt->ram = ram;
+    bt->ap_ram_end = 0x20160000;
     bt->bridge = miband_hci_bridge_new((MiBandHciBridgeCallbacks) {
         bt, miband_bt_bridge_read_ready, miband_bt_bridge_failed
     });
@@ -2016,12 +2029,16 @@ void miband_bt_set_backend(MiBandBt *bt, const char *backend)
     case MIBAND_HCI_LINUX_RAW:
         opened = miband_hci_bridge_open_host(bt->bridge, config.device);
         break;
+    case MIBAND_HCI_PROXY:
+        opened = miband_hci_bridge_open_proxy(bt->bridge, config.path);
+        bt->serial_active = opened;
+        break;
     }
     bt->host_active = opened;
     miband_hci_backend_clear(&config);
     if (!opened) {
-        error_setg(&error_fatal, "miband BT cannot open backend=%s; "
-                   "refusing synthetic fallback", backend);
+        error_setg(&error_fatal, "miband BT cannot open requested backend; "
+                   "refusing synthetic fallback");
     }
 }
 

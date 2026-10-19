@@ -69,6 +69,7 @@
 #include "best1700_cp.h"
 #include "best1700_sys_bth_ipc.h"
 #include "best1700_btc_ipc.h"
+#include "best1700_hci_router.h"
 #include "best1700_dma.h"
 #include "best1700_m55_ipc.h"
 #include "miband_emmc.h"
@@ -320,6 +321,11 @@ struct Best1700MachineState {
     MemoryRegion rf_matrix_view[BEST1700_CORE_COUNT];
     Best1700BtcBaseband btc_baseband;
     Best1700BtcIpc btc_ipc;
+    Best1700HciRouter *hci_router;
+    char *bt_backend, *bt_mailbox;
+    Notifier bt_exit;
+    bool bt_initial_reset_seen;
+    uint32_t hci_trace_table_offset;
     Best1700Dma btc_dma;
     Best1700Dma bth_dma[2];
     MemoryRegion btc_ram;
@@ -2564,6 +2570,13 @@ static void best1700_dsp_reset(Best1700MachineState *s)
 static void best1700_reset(void *opaque)
 {
     Best1700MachineState *s = opaque;
+    if (s->hci_router && s->bt_initial_reset_seen) {
+        best1700_hci_router_close(s->hci_router);
+        vm_stop(RUN_STATE_SHUTDOWN);
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        return;
+    }
+    s->bt_initial_reset_seen = true;
     best1700_rf_matrix_reset(&s->rf_matrix);
     miband_gpu_async_reset(&s->gpu);
     memset(s->gpu.states, 0, sizeof(s->gpu.states));
@@ -3054,6 +3067,81 @@ static void best1700_bth_audma_terminal(void *opaque, unsigned channel)
                                               channel + 34, true);
 }
 
+/* Diagnostic-only observation of the actual CP/BTC HCI boundary. Read RAM
+ * directly: malformed descriptors must never trigger an MMIO read. Payloads
+ * (which can contain keys) are deliberately not logged. */
+static bool best1700_hci_trace_read(AddressSpace *as, uint32_t address,
+                                  void *out, unsigned size)
+{
+    hwaddr offset, length = size;
+    MemoryRegion *mr;
+    bool ok = false;
+
+    rcu_read_lock();
+    mr = address_space_translate(as, address, &offset, &length, false,
+                                 MEMTXATTRS_UNSPECIFIED);
+    if (memory_region_is_ram(mr) && length >= size) {
+        memcpy(out, memory_region_get_ram_ptr(mr) + offset, size);
+        ok = true;
+    }
+    rcu_read_unlock();
+    return ok;
+}
+
+static void best1700_hci_observe(void *opaque, Best1700BtcIpcSide side,
+                                unsigned lane)
+{
+    Best1700MachineState *s = opaque;
+    AddressSpace *as = &s->core[1].address_space;
+    uint8_t *ram = memory_region_get_ram_ptr(&s->btc_ram);
+    uint8_t word[4], descriptor[16], header[7];
+    uint32_t node;
+
+    if (lane != 0 || (side != BEST1700_BTC_IPC_SYS &&
+                      side != BEST1700_BTC_IPC_BTC_SYS)) {
+        return;
+    }
+    node = ldl_le_p(ram + s->hci_trace_table_offset +
+                    (side == BEST1700_BTC_IPC_SYS ? 4 : 0));
+    if (side == BEST1700_BTC_IPC_SYS) {
+        if (!best1700_hci_trace_read(as, node, word, sizeof(word))) {
+            error_report("best1700 HCI trace: unreadable CP list head");
+            return;
+        }
+        node = ldl_le_p(word);
+    }
+    for (unsigned count = 0; node && count < 16; count++) {
+        uint32_t length, payload;
+        if (!best1700_hci_trace_read(as, node, descriptor, sizeof(descriptor))) {
+            error_report("best1700 HCI trace: unreadable descriptor %08x", node);
+            return;
+        }
+        length = ldl_le_p(descriptor + 8);
+        payload = ldl_le_p(descriptor + 12);
+        if (!length || !best1700_hci_trace_read(as, payload, header,
+                                               MIN(length, sizeof(header)))) {
+            error_report("best1700 HCI trace: unreadable header %08x", payload);
+            return;
+        }
+        if (header[0] == 1 && length >= 4) {
+            error_report("best1700 HCI CP->BTC command=%04x length=%u",
+                          lduw_le_p(header + 1), length);
+        } else if (header[0] == 4 && length >= 3) {
+            if (header[1] == 14 && length >= 7) {
+                error_report("best1700 HCI BTC->CP complete=%04x return0=%02x",
+                              lduw_le_p(header + 4), header[6]);
+            } else {
+                error_report("best1700 HCI BTC->CP event=%02x length=%u",
+                              header[1], length);
+            }
+        } else {
+            error_report("best1700 HCI side=%u type=%02x length=%u",
+                          side, header[0], length);
+        }
+        node = ldl_le_p(descriptor);
+    }
+}
+
 static void best1700_bth_gpdma_terminal(void *opaque, unsigned channel)
 {
     Best1700MachineState *s = opaque;
@@ -3096,6 +3184,23 @@ static void best1700_init_btc(Best1700MachineState *s)
     best1700_btc_baseband_connect_sleep(&s->btc_baseband, s,
                                        best1700_btc_mac_sleep);
     best1700_btc_ipc_init(&s->btc_ipc, OBJECT(s));
+    const char *trace_table = getenv("MIBAND_HCI_MAILBOX_TRACE");
+    if (trace_table) {
+        char *end;
+        errno = 0;
+        uint64_t address = strtoull(trace_table, &end, 0);
+        /* The table address belongs to the firmware, supplied explicitly by
+         * the diagnostic caller. Only the physical SRAM window is hardware. */
+        if (errno || end == trace_table || *end || (address & 3) ||
+            address < 0x68000000 ||
+            address - 0x68000000 > memory_region_size(&s->btc_ram) - 8) {
+            error_report("HCI mailbox trace requires a table address within BTC SRAM");
+            exit(1);
+        }
+        s->hci_trace_table_offset = address - 0x68000000;
+        s->btc_ipc.observe = best1700_hci_observe;
+        s->btc_ipc.observe_opaque = s;
+    }
     best1700_dma_init(&s->btc_dma, OBJECT(s), "best1700.btc-dma", 8,
                        &btc->address_space);
     best1700_dma_connect_terminal(&s->btc_dma, &s->btc_baseband,
@@ -3234,6 +3339,49 @@ static void best1700_bth_spi_clock(void *opaque, unsigned index, uint32_t hz)
 
     g_assert(index < G_N_ELEMENTS(s->bth_spi));
     best1700_spi_set_clock_hz(&s->bth_spi[index], hz);
+}
+
+static void best1700_bt_exit(Notifier *notifier, void *data)
+{
+    Best1700MachineState *s = container_of(notifier, Best1700MachineState, bt_exit);
+    best1700_hci_router_close(s->hci_router);
+}
+
+static char *best1700_get_bt_backend(Object *obj, Error **errp)
+{
+    return g_strdup(MIBAND_BEST1700(obj)->hci_router ? "physical" : "disabled");
+}
+
+static char *best1700_get_bt_status(Object *obj, Error **errp)
+{
+    return best1700_hci_router_status(MIBAND_BEST1700(obj)->hci_router);
+}
+
+static char *best1700_get_bt_mailbox(Object *obj, Error **errp)
+{
+    return g_strdup(MIBAND_BEST1700(obj)->bt_mailbox ?: "");
+}
+
+static void best1700_set_bt_backend(Object *obj, const char *value, Error **errp)
+{
+    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    if (s->workers_started) {
+        error_setg(errp, "bt-backend is startup-only");
+        return;
+    }
+    g_free(s->bt_backend);
+    s->bt_backend = g_strdup(value);
+}
+
+static void best1700_set_bt_mailbox(Object *obj, const char *value, Error **errp)
+{
+    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    if (s->workers_started) {
+        error_setg(errp, "bt-mailbox is startup-only");
+        return;
+    }
+    g_free(s->bt_mailbox);
+    s->bt_mailbox = g_strdup(value);
 }
 
 static void best1700_init(MachineState *machine)
@@ -3625,6 +3773,18 @@ static void best1700_init(MachineState *machine)
     if (s->btc_real_boot) {
         best1700_init_btc(s);
     }
+    if (s->bt_backend) {
+        if (!s->btc_real_boot || !s->cp_real_boot || !s->bth_real_boot) {
+            error_report("external HCI requires the complete CP/BTH/BTC topology");
+            exit(1);
+        }
+        s->hci_router = best1700_hci_router_new(OBJECT(s),
+            &s->core[1].address_space, &s->core[1].space, &s->core[0].space,
+            &s->btc_ipc, s->bt_mailbox, s->bt_backend, &error_fatal);
+        g_clear_pointer(&s->bt_backend, g_free);
+        s->bt_exit.notify = best1700_bt_exit;
+        qemu_add_exit_notifier(&s->bt_exit);
+    }
     /* Host physical-memory clients use the AP bus view.  Peer CPUs retain
      * their independent address spaces and only share explicit windows. */
     memory_region_init_alias(&s->system_view, OBJECT(s), "best1700.ap-system",
@@ -3759,6 +3919,11 @@ static void best1700_machine_class_init(ObjectClass *oc, void *data)
     mc->min_cpus = BEST1700_CORE_COUNT;
     mc->default_cpus = BEST1700_CORE_COUNT;
     mc->max_cpus = BEST1700_CORE_COUNT + 1;
+    object_class_property_add_str(oc, "bt-backend", best1700_get_bt_backend,
+                                  best1700_set_bt_backend);
+    object_class_property_add_str(oc, "bt-mailbox", best1700_get_bt_mailbox,
+                                  best1700_set_bt_mailbox);
+    object_class_property_add_str(oc, "bt-status", best1700_get_bt_status, NULL);
     object_class_property_add(oc, "boot-sp", "uint32",
                               best1700_get_boot_vector, best1700_set_boot_vector,
                               NULL, NULL);

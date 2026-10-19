@@ -8,6 +8,7 @@ typedef enum MiBandHciBackendKind {
     MIBAND_HCI_SYNTHETIC,
     MIBAND_HCI_SERIAL,
     MIBAND_HCI_LINUX_RAW,
+    MIBAND_HCI_PROXY,
 } MiBandHciBackendKind;
 
 typedef struct MiBandHciBackendConfig {

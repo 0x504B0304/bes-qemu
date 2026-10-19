@@ -32,6 +32,8 @@ typedef struct MiBandBt {
     uint32_t regs[4][0x10000 / 4];
     AddressSpace *as;
     uint8_t *ram;
+    uint32_t ap_ram_end;
+    bool control_channel_one;
     uint32_t mailbox_status;
     bool mailbox_pending[2];
     bool tx_done_pending[2];
