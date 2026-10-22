@@ -65,6 +65,7 @@ def install(qemu, root=ROOT):
         ('tcg-block-limit', 'TCG translation block limit'),
         ('armv7m-dwt', 'ARMv7M DWT'),
         ('armv7m-cache-maintenance', 'ARMv7M cache maintenance'),
+        ('armv7m-fpb', 'ARMv7M FPB/DEMCR'),
         ('sd-read-ahead', 'SD/eMMC host read-ahead'),
         ('sd-media-state', 'SD/eMMC media state'),
         ('vnc-refresh-60hz', 'VNC 60 Hz refresh'),

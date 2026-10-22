@@ -89,3 +89,15 @@ default, bounded, one-instruction and icount execution. Set
 - `test_pmu_poweroff_qtest.py`: opt-in synthetic PMU bit-0 shutdown, GPADC shared
   register, frame/page/chip-select isolation and reset. Set
   `MIBAND_BEST1700_QEMU` only when intentionally running these QEMU tests.
+
+`test_armv7m_fpb` checks the FPBv2 control/comparator registers and DEMCR
+storage added by the `armv7m-fpb` backport. It runs a best1502p Qtest machine
+and does not execute a guest:
+
+```sh
+MIBAND_FPB_QEMU=/path/to/qemu-system-arm python3 -m unittest tests.test_armv7m_fpb -v
+```
+
+The model is an execution-comparator/DebugMonitor subset. It does not implement
+flash remapping, halting debug, secure debug authentication, DWT, or a complete
+breakpoint exception lifecycle; those remain outside its qualification.
