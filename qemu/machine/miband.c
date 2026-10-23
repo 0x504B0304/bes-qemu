@@ -90,6 +90,16 @@
 #define MMIO_SIZE       0x20000000
 #define LOW_MMIO_BASE   0x07000000
 #define LOW_MMIO_SIZE   0x01000000
+/* ARMv8-M leaves the number of MPU regions IMPLEMENTATION DEFINED. The core
+ * reports its choice through MPU_TYPE.DREGION (bits [15:8], with SEPARATE
+ * clear for a unified MPU) and defines per-region state only below that
+ * count. The BES1503 AP integrates eight regions, and its early loader
+ * compares the reported count with eight and stops with its own error result
+ * when they differ, so the board states the count instead of inheriting the
+ * CPU model's 16; M-profile MPUs implement at most 16 regions. QEMU models
+ * one shared count for Secure and NonSecure, so both properties must carry
+ * the same architecturally implemented value. */
+#define MIBAND_MPU_REGIONS 8u
 
 typedef struct MiBandMachineState MiBandMachineState;
 
@@ -768,6 +778,10 @@ static void miband_init(MachineState *machine)
     armv7m = DEVICE(&s->armv7m);
     qdev_prop_set_uint32(armv7m, "num-irq", 128);
     qdev_prop_set_string(armv7m, "cpu-type", machine->cpu_type);
+    /* Program the ARM-implementation-defined MPU geometry of the SoC. */
+    G_STATIC_ASSERT(MIBAND_MPU_REGIONS > 0 && MIBAND_MPU_REGIONS <= 16);
+    qdev_prop_set_uint32(armv7m, "mpu-ns-regions", MIBAND_MPU_REGIONS);
+    qdev_prop_set_uint32(armv7m, "mpu-s-regions", MIBAND_MPU_REGIONS);
     qdev_connect_clock_in(armv7m, "cpuclk", s->sysclk);
     qdev_connect_clock_in(armv7m, "refclk", s->refclk);
     object_property_set_link(OBJECT(&s->armv7m), "memory",

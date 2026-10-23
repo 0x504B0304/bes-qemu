@@ -1972,7 +1972,7 @@
     },
     {
       "path": "qemu/machine/miband.c",
-      "sha256": "4abef5e5bb18488ca73ee2348806de52fb073b032c7d38eb1ed861d63ff22b03",
+      "sha256": "e25859e1d62627f8292c00ddc1b10fc6aeb953a740e30e9f96c4753a638281b5",
       "source_commit": "2b6fa7f86bcb627195b5b68b74385d92c2a53bb2",
       "original_git_blob": "0b20552a213f4af820bfd2372281918356e9cda5",
       "original_sha256": "ff4ce2f74d333a69b482398df51bbf9aa667f327216b46a6cf3145ec799faaab",
@@ -5203,6 +5203,25 @@
       "notices": [],
       "technical_independence": "public-build-test-or-documentation-support",
       "rights_status": "existing-contribution-rights-unconfirmed",
+      "independent_proprietary_use_basis": false,
+      "proprietary_release_approved": false,
+      "publish_source_for_review": true,
+      "distribution_obligation": "Preserve source and original notices; assess applicable licenses per file."
+    },
+    {
+      "path": "tests/test_best1503_mpu_qtest.py",
+      "sha256": "3db9d155946b9ccc66a89c96f70b1364e6bfcd810d5e0497a8e1dca566b2c6c5",
+      "source_commit": null,
+      "original_git_blob": null,
+      "original_sha256": null,
+      "declared_license": [
+        "GPL-2.0-or-later"
+      ],
+      "notices": [
+        "# SPDX-License-Identifier: GPL-2.0-or-later"
+      ],
+      "technical_independence": "public-build-test-or-documentation-support",
+      "rights_status": "new-explicit-license-see-file",
       "independent_proprietary_use_basis": false,
       "proprietary_release_approved": false,
       "publish_source_for_review": true,
