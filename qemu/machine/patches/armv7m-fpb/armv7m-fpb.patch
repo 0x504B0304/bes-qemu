@@ -11,42 +11,140 @@
          memory_region_init_io(&s->sysreg_ns_mem, OBJECT(s),
 --- a/hw/intc/armv7m_nvic.c
 +++ b/hw/intc/armv7m_nvic.c
-@@ -27,6 +27,67 @@
+@@ -27,6 +27,172 @@
  #include "qemu/log.h"
  #include "qemu/module.h"
  #include "trace.h"
 +
-+/* FPBv2 subset for the Mi Band Cortex-M33 probe. Eight instruction address
-+ * comparators, KEY/ENABLE and full halfword address matching; no flash
-+ * remapping, DWT, halting debugger, or secure debug authentication model. */
++/* ARMv7-M FPBv2. The legacy bit-0 comparator encoding used by existing
++ * firmware is accepted in addition to the architectural REPLACE field.
++ * FPB breakpoints are kept in their own ownership array. */
++#define FPB_CTRL_ENABLE             (1u << 0)
++#define FPB_CTRL_KEY                (1u << 1)
++#define FPB_CTRL_NUM_CODE           (8u << 4)
++#define FPB_CTRL_REV                0x10000000u
++#define FPB_COMP_REPLACE_MASK       0xc0000000u
++#define FPB_COMP_REPLACE_LOWER      0x40000000u
++#define FPB_COMP_REPLACE_UPPER      0x80000000u
++#define FPB_COMP_REPLACE_BOTH       0xc0000000u
++#define FPB_COMP_ADDRESS_MASK       0x1ffffffcu
++#define FPB_REMAP_RMPSPT            (1u << 29)
++#define FPB_REMAP_ADDR_MASK         0x1fffffe0u
++#define DEMCR_MON_EN                (1u << 16)
++#define DEMCR_MON_STEP              (1u << 18)
++#define DEMCR_MON_PEND              (1u << 17)
++#define DEMCR_SDME                  (1u << 20)
++
++static bool nvic_fpb_access_ok(NVICState *s, MemTxAttrs attrs)
++{
++    /* FPB is privileged. On v8-M, SDME selects the Secure debug domain;
++     * an NS access to the secure-only view is RAZ/WI. */
++    if (attrs.user) {
++        return false;
++    }
++    if (arm_feature(&s->cpu->env, ARM_FEATURE_M_SECURITY) &&
++        !attrs.secure && (s->demcr & DEMCR_SDME)) {
++        return false;
++    }
++    return true;
++}
++
++static bool nvic_fpb_is_remap(NVICState *s, uint32_t comp)
++{
++    /* FPBv2 REPLACE=00 uses the remap table. A zero remap base is treated
++     * as the legacy debugger encoding used by existing profiles. */
++    return (comp & FPB_COMP_REPLACE_MASK) == 0 &&
++           s->fpb_remap_valid;
++}
++
++static bool nvic_fpb_is_breakpoint(NVICState *s, uint32_t comp)
++{
++    uint32_t replace = comp & FPB_COMP_REPLACE_MASK;
++    return (comp & 1) && (replace != 0 || s->fpb_remap == 0);
++}
++
++static vaddr nvic_fpb_address(uint32_t comp)
++{
++    return comp & FPB_COMP_ADDRESS_MASK;
++}
++
++static void nvic_fpb_clear_breakpoints(NVICState *s)
++{
++    unsigned i;
++    if (!s->cpu) {
++        return;
++    }
++    for (i = 0; i < ARRAY_SIZE(s->fpb_breakpoint); ++i) {
++        if (s->fpb_breakpoint[i]) {
++            cpu_breakpoint_remove_by_ref(CPU(s->cpu), s->fpb_breakpoint[i]);
++            s->fpb_breakpoint[i] = NULL;
++        }
++    }
++}
++
 +static void nvic_fpb_update(NVICState *s)
 +{
-+    CPUARMState *env = &s->cpu->env;
 +    unsigned i;
 +
-+    cpu_breakpoint_remove_all(CPU(s->cpu), BP_CPU);
-+    memset(env->cpu_breakpoint, 0, sizeof(env->cpu_breakpoint));
-+    if (!(s->fpb_ctrl & 1)) {
++    nvic_fpb_clear_breakpoints(s);
++    if (!(s->fpb_ctrl & FPB_CTRL_ENABLE)) {
 +        return;
 +    }
 +    for (i = 0; i < ARRAY_SIZE(s->fpb_comp); ++i) {
-+        if (s->fpb_comp[i] & 1) {
-+            cpu_breakpoint_insert(CPU(s->cpu), s->fpb_comp[i] & ~1u,
-+                                  BP_CPU, &env->cpu_breakpoint[i]);
++        if (nvic_fpb_is_breakpoint(s, s->fpb_comp[i]) ||
++            nvic_fpb_is_remap(s, s->fpb_comp[i])) {
++            cpu_breakpoint_insert(CPU(s->cpu), nvic_fpb_address(s->fpb_comp[i]),
++                                  BP_CPU, &s->fpb_breakpoint[i]);
 +        }
 +    }
++}
++
++bool armv7m_nvic_fpb_debugmon_enabled(NVICState *s)
++{
++    return (s->demcr & DEMCR_MON_EN) != 0;
++}
++
++bool armv7m_nvic_fpb_match(NVICState *s, vaddr pc, vaddr *remap_pc)
++{
++    unsigned i;
++
++    if (!(s->fpb_ctrl & FPB_CTRL_ENABLE)) {
++        return false;
++    }
++    for (i = 0; i < ARRAY_SIZE(s->fpb_comp); ++i) {
++        uint32_t comp = s->fpb_comp[i];
++        if (!nvic_fpb_is_breakpoint(s, comp) && !nvic_fpb_is_remap(s, comp)) {
++            continue;
++        }
++        if (nvic_fpb_address(comp) != (pc & ~1u)) {
++            continue;
++        }
++        if (nvic_fpb_is_remap(s, comp)) {
++            /* Each comparator owns one word in the remap table. Preserve the
++             * halfword selected by the original PC. */
++            if (remap_pc) {
++                *remap_pc = s->fpb_remap_base + (s->fpb_remap & FPB_REMAP_ADDR_MASK) +
++                           i * 4 + (pc & 2);
++            }
++        }
++        return true;
++    }
++    return false;
 +}
 +
 +static MemTxResult nvic_fpb_read(void *opaque, hwaddr offset, uint64_t *data,
 +                                 unsigned size, MemTxAttrs attrs)
 +{
 +    NVICState *s = opaque;
-+    if (attrs.user) {
++    if (!nvic_fpb_access_ok(s, attrs)) {
 +        return MEMTX_ERROR;
 +    }
 +    *data = 0;
 +    if (offset == 0) {
-+        *data = 0x10000080u | (s->fpb_ctrl & 1);
++        *data = FPB_CTRL_REV | FPB_CTRL_NUM_CODE |
++                (s->fpb_ctrl & FPB_CTRL_ENABLE);
++    } else if (offset == 4) {
++        *data = (s->fpb_remap & ~0x1fu) | FPB_REMAP_RMPSPT;
 +    } else if (offset >= 8 && offset < 40) {
 +        *data = s->fpb_comp[(offset - 8) / 4];
 +    }
@@ -57,14 +155,21 @@
 +                                  unsigned size, MemTxAttrs attrs)
 +{
 +    NVICState *s = opaque;
-+    if (attrs.user) {
++    if (!nvic_fpb_access_ok(s, attrs)) {
 +        return MEMTX_ERROR;
 +    }
-+    if (offset == 0 && (value & 2)) {
-+        s->fpb_ctrl = value & 1;
-+        nvic_fpb_update(s);
++    if (offset == 0) {
++        /* KEY is required on every FP_CTRL write; it is never stored. */
++        if (value & FPB_CTRL_KEY) {
++            s->fpb_ctrl = value & FPB_CTRL_ENABLE;
++            nvic_fpb_update(s);
++        }
++    } else if (offset == 4) {
++        s->fpb_remap = value & FPB_REMAP_ADDR_MASK;
++        s->fpb_remap_valid = true;
 +    } else if (offset >= 8 && offset < 40) {
-+        s->fpb_comp[(offset - 8) / 4] = value;
++        s->fpb_comp[(offset - 8) / 4] = value &
++            (FPB_COMP_REPLACE_MASK | FPB_COMP_ADDRESS_MASK | 1u);
 +        nvic_fpb_update(s);
 +    }
 +    return MEMTX_OK;
@@ -79,7 +184,7 @@
  
  /* IRQ number counting:
   *
-@@ -189,8 +250,7 @@
+@@ -189,8 +355,7 @@
      case ARMV7M_EXCP_SECURE:
          return true;
      case ARMV7M_EXCP_DEBUG:
@@ -89,40 +194,68 @@
      default:
          /* reset, and reserved (unused) low exception numbers.
           * We'll get called by code that loops through all the exception
-@@ -1240,6 +1300,8 @@
+@@ -1240,6 +1405,12 @@
          return cpu->env.v7m.hfsr;
      case 0xd30: /* Debug Fault Status.  */
          return cpu->env.v7m.dfsr;
-+    case 0xdfc: /* DEMCR: monitor enable and trace enable storage. */
-+        return s->demcr;
++    case 0xdfc: /* DEMCR */
++        if (!attrs.secure && (s->demcr & DEMCR_SDME)) {
++            return 0;
++        }
++        return (s->demcr & (DEMCR_MON_EN | DEMCR_MON_STEP | DEMCR_SDME)) |
++               (s->vectors[ARMV7M_EXCP_DEBUG].pending ? DEMCR_MON_PEND : 0);
      case 0xd34: /* MMFAR MemManage Fault Address */
          if (!arm_feature(&cpu->env, ARM_FEATURE_M_MAIN)) {
              goto bad_offset;
-@@ -1788,6 +1850,15 @@
+@@ -1788,6 +1959,24 @@
      case 0xd30: /* Debug Fault Status.  */
          cpu->env.v7m.dfsr &= ~value; /* W1C */
          break;
-+    case 0xdfc: /* DEMCR. MON_STEP/MON_PEND/halting debug are not modeled. */
-+        /* SDME is Secure writable only. The board runs its AP in Secure
-+         * state; routing to NS with an unset NS VTOR would fault on entry. */
-+        s->demcr = (value & 0x01010000u) |
-+                   (attrs.secure ? (value & 0x00100000u) :
-+                                   (s->demcr & 0x00100000u));
-+        s->vectors[ARMV7M_EXCP_DEBUG].enabled = !!(value & (1u << 16));
++    case 0xdfc: /* DEMCR */
++        if (!attrs.secure && (s->demcr & DEMCR_SDME)) {
++            break;
++        }
++        /* MON_EN/MON_STEP are available to privileged code. SDME is Secure
++         * only. MON_PEND is a write-one request and reads from NVIC state. */
++        s->demcr = (s->demcr & DEMCR_SDME) |
++                   (value & (DEMCR_MON_EN | DEMCR_MON_STEP));
++        if (attrs.secure) {
++            s->demcr = (s->demcr & ~DEMCR_SDME) | (value & DEMCR_SDME);
++        }
++        s->vectors[ARMV7M_EXCP_DEBUG].enabled =
++            !!(s->demcr & DEMCR_MON_EN);
++        if (value & DEMCR_MON_PEND) {
++            s->vectors[ARMV7M_EXCP_DEBUG].pending = 1;
++        }
 +        nvic_irq_update(s);
 +        break;
      case 0xd34: /* Mem Manage Address.  */
          if (!arm_feature(&cpu->env, ARM_FEATURE_M_MAIN)) {
              goto bad_offset;
-@@ -2520,6 +2591,7 @@
+@@ -2195,7 +2384,11 @@
+         }
+         return M_REG_NS;
+     case ARMV7M_EXCP_DEBUG:
+-        /* Not banked. TODO should RAZ/WI if DEMCR.SDME is set */
++        /* Not banked. Non-Secure code cannot access the Secure view when
++         * SDME is set. */
++        if (!attrs.secure && (s->demcr & DEMCR_SDME)) {
++            return -1;
++        }
+         return M_REG_NS;
+     case 8 ... 10:
+     case 13:
+@@ -2520,6 +2713,9 @@
      }
  
      nvic_recompute_state(s);
++    nvic_fpb_clear_breakpoints(s);
++    memset(s->fpb_breakpoint, 0, sizeof(s->fpb_breakpoint));
 +    nvic_fpb_update(s);
  
      return 0;
  }
-@@ -2584,13 +2656,16 @@
+@@ -2584,13 +2780,19 @@
  
  static const VMStateDescription vmstate_nvic = {
      .name = "armv7m_nvic",
@@ -135,22 +268,36 @@
                               vmstate_VecInfo, VecInfo),
          VMSTATE_UINT32(prigroup[M_REG_NS], NVICState),
 +        VMSTATE_UINT32_V(fpb_ctrl, NVICState, 5),
++        VMSTATE_UINT32_V(fpb_remap, NVICState, 5),
++        VMSTATE_UINT32_V(fpb_remap_base, NVICState, 5),
++        VMSTATE_BOOL_V(fpb_remap_valid, NVICState, 5),
 +        VMSTATE_UINT32_ARRAY_V(fpb_comp, NVICState, 8, 5),
 +        VMSTATE_UINT32_V(demcr, NVICState, 5),
          VMSTATE_END_OF_LIST()
      },
      .subsections = (const VMStateDescription*[]) {
-@@ -2614,6 +2689,9 @@
+@@ -2602,6 +2804,7 @@
+ static Property props_nvic[] = {
+     /* Number of external IRQ lines (so excluding the 16 internal exceptions) */
+     DEFINE_PROP_UINT32("num-irq", NVICState, num_irq, 64),
++    DEFINE_PROP_UINT32("fpb-remap-base", NVICState, fpb_remap_base, 0x20000000),
+     DEFINE_PROP_END_OF_LIST()
+ };
+ 
+@@ -2614,6 +2817,12 @@
      memset(s->sec_vectors, 0, sizeof(s->sec_vectors));
      s->prigroup[M_REG_NS] = 0;
      s->prigroup[M_REG_S] = 0;
-+    s->fpb_ctrl = s->demcr = 0;
++    nvic_fpb_clear_breakpoints(s);
++    s->fpb_ctrl = s->fpb_remap = s->demcr = 0;
++    s->fpb_remap_valid = false;
 +    memset(s->fpb_comp, 0, sizeof(s->fpb_comp));
++    memset(s->fpb_breakpoint, 0, sizeof(s->fpb_breakpoint));
 +    nvic_fpb_update(s);
  
      s->vectors[ARMV7M_EXCP_NMI].enabled = 1;
      /* MEM, BUS, and USAGE are enabled through
-@@ -2725,6 +2803,9 @@
+@@ -2725,6 +2934,9 @@
      memory_region_init_io(&s->sysregmem, OBJECT(s), &nvic_sysreg_ops, s,
                            "nvic_sysregs", 0x1000);
      sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sysregmem);
@@ -162,18 +309,36 @@
  static void armv7m_nvic_instance_init(Object *obj)
 --- a/include/hw/intc/armv7m_nvic.h
 +++ b/include/hw/intc/armv7m_nvic.h
-@@ -77,6 +77,11 @@
+@@ -77,6 +77,17 @@
      int vectpending_prio; /* group prio of the exception in vectpending */
  
      MemoryRegion sysregmem;
-+    /* Experimental M-profile FPBv2 execution comparators (no remapping). */
++    /* M-profile FPBv2 state. Breakpoints are owned separately from GDB
++     * and architectural CPU breakpoints so updating FPB cannot remove a
++     * debugger breakpoint. */
 +    MemoryRegion fpbmem;
 +    uint32_t fpb_ctrl;
++    uint32_t fpb_remap;
++    uint32_t fpb_remap_base;
++    bool fpb_remap_valid;
 +    uint32_t fpb_comp[8];
++    CPUBreakpoint *fpb_breakpoint[8];
 +    uint32_t demcr;
  
      uint32_t num_irq;
      qemu_irq excpout;
+@@ -172,6 +183,11 @@
+  * RDY bit for it in the FPCCR is set.
+  */
+ bool armv7m_nvic_get_ready_status(NVICState *s, int irq, bool secure);
++
++/* Query the execution comparators without exposing their implementation.
++ * @remap_pc is set when the match is a flash-remap comparator. */
++bool armv7m_nvic_fpb_match(NVICState *s, vaddr pc, vaddr *remap_pc);
++bool armv7m_nvic_fpb_debugmon_enabled(NVICState *s);
+ /**
+  * armv7m_nvic_raw_execution_priority: return the raw execution priority
+  * @s: the NVIC
 --- a/target/arm/debug_helper.c
 +++ b/target/arm/debug_helper.c
 @@ -14,6 +14,9 @@
@@ -186,14 +351,19 @@
  
  #ifdef CONFIG_TCG
  /* Return the Exception Level targeted by debug exceptions. */
-@@ -381,6 +384,15 @@
+@@ -381,6 +384,20 @@
      target_ulong pc;
      int n;
  
 +#ifndef CONFIG_USER_ONLY
 +    if (arm_feature(env, ARM_FEATURE_M)) {
-+        /* FPB address matches run through the architectural NVIC exception
-+         * path. Suppress monitor events when its priority cannot preempt. */
++        vaddr remap_pc = 0;
++        bool fpb = armv7m_nvic_fpb_match(env->nvic, env->regs[15], &remap_pc);
++        if (fpb) {
++            /* Remap comparators are handled in arm_debug_excp_handler. */
++            return true;
++        }
++        /* Architectural CPU breakpoints use the DebugMonitor priority. */
 +        return armv7m_nvic_get_ready_status(env->nvic, ARMV7M_EXCP_DEBUG, false)
 +            && cpu_breakpoint_test(cs, env->regs[15], BP_CPU);
 +    }
@@ -202,17 +372,45 @@
      /*
       * If breakpoints are disabled globally or we can't take debug
       * exceptions here then breakpoint firings are ignored.
-@@ -496,6 +508,13 @@
-             || !cpu_breakpoint_test(cs, pc, BP_CPU)) {
-             return;
-         }
+@@ -486,14 +503,39 @@
+     } else {
+         uint64_t pc = is_a64(env) ? env->pc : env->regs[15];
+ 
++        /* A user/GDB breakpoint wins when it shares an address with FPB. */
++        if (cpu_breakpoint_test(cs, pc, BP_GDB)) {
++            return;
++        }
 +
 +#ifndef CONFIG_USER_ONLY
 +        if (arm_feature(env, ARM_FEATURE_M)) {
-+            env->v7m.dfsr |= 2; /* BKPT: includes FPB instruction matches */
-+            raise_exception(env, EXCP_BKPT, 0, 1);
++            vaddr remap_pc = ~(vaddr)0;
++            if (armv7m_nvic_fpb_match(env->nvic, pc, &remap_pc)) {
++                /* Flash remap is an execution redirect, not a debug stop. */
++                if (remap_pc != ~(vaddr)0) {
++                    env->regs[15] = remap_pc | (env->thumb ? 1 : 0);
++                    return;
++                }
++                env->v7m.dfsr |= 2;
++                if (!armv7m_nvic_fpb_debugmon_enabled(env->nvic)) {
++                    /* Halting debug when MON_EN is clear. QEMU's outer loop
++                     * will leave the vCPU stopped for an external debugger. */
++                    cs->halted = 1;
++                    return;
++                }
++                raise_exception(env, EXCP_BKPT, 0, 1);
++            }
 +        }
 +#endif
- 
-         env->exception.fsr = arm_debug_exception_fsr(env);
++
          /*
+          * (1) GDB breakpoints should be handled first.
+          * (2) Do not raise a CPU exception if no CPU breakpoint has fired,
+          * since singlestep is also done by generating a debug internal
+          * exception.
+          */
+-        if (cpu_breakpoint_test(cs, pc, BP_GDB)
+-            || !cpu_breakpoint_test(cs, pc, BP_CPU)) {
++        if (!cpu_breakpoint_test(cs, pc, BP_CPU)) {
+             return;
+         }
+ 

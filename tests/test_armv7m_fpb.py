@@ -6,6 +6,7 @@ import unittest
 from tests.test_best1700_peripherals_qtest import QtestMachine
 
 FPB_CTRL = 0xe0002000
+FPB_REMAP = 0xe0002004
 FPB_COMP0 = 0xe0002008
 DEMCR = 0xe000edfc
 
@@ -71,8 +72,12 @@ class Armv7mFpbTests(unittest.TestCase):
                          machine_name='miband-best1502p')
         self.addCleanup(q.close)
         self.assertEqual(q.read32(FPB_CTRL), 0x10000080)
+        q.write32(FPB_CTRL, 1)
+        self.assertEqual(q.read32(FPB_CTRL), 0x10000080)
         q.write32(FPB_CTRL, 3)
         self.assertEqual(q.read32(FPB_CTRL), 0x10000081)
+        q.write32(FPB_REMAP, 0x20002003)
+        self.assertEqual(q.read32(FPB_REMAP), 0x20002000)
         q.write32(FPB_COMP0, 0x0c0c0101)
         self.assertEqual(q.read32(FPB_COMP0), 0x0c0c0101)
         q.write32(DEMCR, 0x00010000)
