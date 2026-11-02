@@ -3,6 +3,8 @@
   "sources": [
     "qemu/machine/miband.c",
     "qemu/machine/best1502p.c",
+    "qemu/bridges/net/miband_net.c",
+    "qemu/bridges/net/miband_net.h",
     "qemu/soc/best1502p/controllers/cmu/best1502p_aon_reset.c",
     "qemu/soc/best1502p/controllers/cmu/best1502p_aon_reset.h",
     "qemu/soc/best1502p/controllers/cmu/best1502p_lpu.c",

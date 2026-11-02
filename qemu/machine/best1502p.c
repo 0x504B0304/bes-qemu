@@ -50,6 +50,7 @@
 #include "miband_binding_ui.h"
 #include "miband_charger.h"
 #include "miband_bt.h"
+#include "miband_net.h"
 
 #define BEST1502P_XIP_BASE       0x0c000000u
 #define BEST1502P_NC_BASE        0x28000000u
@@ -198,6 +199,7 @@ struct Best1502pMachineState {
     MiBandNandDevice *nand;
     char *flash_state;
     char *firmware_profile;
+    char *netdev;
     bool diag_skip_binding, initialized;
     MiBandStore *store;
     MiBandFlash nand_ctrl[MIBAND_FLASH_COUNT];
@@ -1001,6 +1003,22 @@ static char *best1502p_get_firmware(Object *obj, Error **errp)
     return g_strdup(BEST1502P_MACHINE(obj)->firmware_profile);
 }
 
+static char *best1502p_get_netdev(Object *obj, Error **errp)
+{
+    return g_strdup(BEST1502P_MACHINE(obj)->netdev);
+}
+
+static void best1502p_set_netdev(Object *obj, const char *value, Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "netdev is startup-only");
+        return;
+    }
+    g_free(s->netdev);
+    s->netdev = g_strdup(value);
+}
+
 static char *best1502p_get_bt_backend(Object *obj, Error **errp)
 {
     /* Session credentials are startup-only; never return them through QOM. */
@@ -1039,6 +1057,75 @@ static void best1502p_set_bt_backend(Object *obj, const char *value, Error **err
     }
     g_free(s->bt_backend);
     s->bt_backend = g_strdup(value);
+}
+
+static char *best1502p_get_bt_synthetic_pop_ap_packet(Object *obj,
+                                                       Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    uint8_t packet[MIBAND_BT_PACKET_MAX];
+    unsigned channel = 0;
+    unsigned length = miband_bt_pop_synthetic_ap_packet(&s->bt, packet,
+                                                         sizeof(packet),
+                                                         &channel);
+    char *text = g_malloc(3 + length * 2);
+
+    g_snprintf(text, 3, "%u:", channel);
+    for (unsigned i = 0; i < length; i++) {
+        g_snprintf(text + 2 + i * 2, 3, "%02x", packet[i]);
+    }
+    text[2 + length * 2] = '\0';
+    return text;
+}
+
+static int best1502p_hex_digit(char c);
+
+static int best1502p_hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static void best1502p_set_bt_synthetic_inject(Object *obj, const char *value,
+                                                Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    uint8_t packet[MIBAND_BT_PACKET_MAX];
+    unsigned digits = 0, length = 0, channel = 0;
+    int high = -1;
+    const char *hex = value ? value : "";
+
+    if (!s->bt.as) {
+        error_setg(errp, "synthetic peer injection requires an initialized BT controller");
+        return;
+    }
+    if (hex[0] && hex[0] >= '0' && hex[0] <= '1' && hex[1] == ':') {
+        channel = (unsigned)(hex[0] - '0');
+        hex += 2;
+    }
+    for (const char *p = hex; *p; p++) {
+        int digit = best1502p_hex_digit(*p);
+        if (digit < 0) {
+            if (g_ascii_isspace(*p) || *p == ':' || *p == '-') continue;
+            error_setg(errp, "bt-synthetic-inject must be hexadecimal HCI bytes");
+            return;
+        }
+        if (++digits > sizeof(packet) * 2) {
+            error_setg(errp, "bt-synthetic-inject packet is too large");
+            return;
+        }
+        if (high < 0) high = digit;
+        else {
+            packet[length++] = (uint8_t)((high << 4) | digit);
+            high = -1;
+        }
+    }
+    if (!digits || high >= 0 ||
+        !miband_bt_inject_hci(&s->bt, channel, packet, length)) {
+        error_setg(errp, "bt-synthetic-inject packet could not be queued");
+    }
 }
 
 static void best1502p_set_firmware(Object *obj, const char *value, Error **errp)
@@ -1381,6 +1468,10 @@ static void best1502p_init(MachineState *machine)
                        s->diag_skip_binding ? NULL : machine->kernel_filename,
                        code_base, BEST1502P_FLASH_SIZE - s->flash_offset);
     best1502p_open_storage(s);
+    if (s->netdev) {
+        miband_net_machine_init(machine, get_system_memory(), s->netdev,
+                                &error_fatal);
+    }
     s->initialized = true;
 }
 
@@ -1393,6 +1484,10 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
     bes_runtime_config_property(oc);
     object_class_property_add_str(oc, "bt-backend", best1502p_get_bt_backend,
                                   best1502p_set_bt_backend);
+    object_class_property_add_str(oc, "bt-synthetic-inject", NULL,
+                                  best1502p_set_bt_synthetic_inject);
+    object_class_property_add_str(oc, "bt-synthetic-pop-ap-packet",
+                                  best1502p_get_bt_synthetic_pop_ap_packet, NULL);
 
     mc->desc = "BES best1502p AP bring-up machine (Cortex-M33)";
     mc->init = best1502p_init;
@@ -1406,6 +1501,8 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
                                    best1502p_set_skip_binding);
     object_class_property_add_str(oc, "resource-image", best1502p_get_resource,
                                   best1502p_set_resource);
+    object_class_property_add_str(oc, "netdev", best1502p_get_netdev,
+                                  best1502p_set_netdev);
     object_class_property_add_str(oc, "flash-state", best1502p_get_flash_state,
                                   best1502p_set_flash_state);
     object_class_property_add(oc, "boot-sp", "uint32",

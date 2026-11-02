@@ -76,6 +76,7 @@
 #include "cw221x.h"
 #include "sc89620.h"
 #include "miband_store.h"
+#include "miband_net.h"
 
 #define TYPE_MIBAND_BEST1700 MACHINE_TYPE_NAME("miband-best1700")
 OBJECT_DECLARE_SIMPLE_TYPE(Best1700MachineState, MIBAND_BEST1700)
@@ -417,6 +418,7 @@ struct Best1700MachineState {
     uint32_t dsp_core_wait;
     uint32_t dsp_vector;
     char *profile_id;
+    char *netdev;
     char *core_status;
     char *ipc_status;
     uint32_t boot_sp;
@@ -2681,6 +2683,22 @@ static char *best1700_get_profile(Object *obj, Error **errp)
     return g_strdup(MIBAND_BEST1700(obj)->profile_id);
 }
 
+static char *best1700_get_netdev(Object *obj, Error **errp)
+{
+    return g_strdup(MIBAND_BEST1700(obj)->netdev);
+}
+
+static void best1700_set_netdev(Object *obj, const char *value, Error **errp)
+{
+    Best1700MachineState *s = MIBAND_BEST1700(obj);
+    if (s->workers_started) {
+        error_setg(errp, "netdev is startup-only");
+        return;
+    }
+    g_free(s->netdev);
+    s->netdev = g_strdup(value);
+}
+
 static void best1700_set_profile(Object *obj, const char *value, Error **errp)
 {
     Best1700MachineState *s = MIBAND_BEST1700(obj);
@@ -3886,6 +3904,10 @@ static void best1700_init(MachineState *machine)
     memory_region_init_alias(&s->system_view, OBJECT(s), "best1700.ap-system",
                              &s->core[0].space, 0, UINT64_MAX);
     memory_region_add_subregion(get_system_memory(), 0, &s->system_view);
+    if (s->netdev) {
+        miband_net_machine_init(machine, &s->core[0].space, s->netdev,
+                                &error_fatal);
+    }
     s->workers_started = true;
     qemu_register_reset(best1700_reset, s);
     s->machine_done.notify = best1700_machine_done;
@@ -4044,6 +4066,8 @@ static void best1700_machine_class_init(ObjectClass *oc, void *data)
     }
     object_class_property_add_str(oc, "profile-id", best1700_get_profile,
                                   best1700_set_profile);
+    object_class_property_add_str(oc, "netdev", best1700_get_netdev,
+                                  best1700_set_netdev);
     object_class_property_add_str(oc, "emmc-drive", best1700_get_emmc_drive,
                                   best1700_set_emmc_drive);
     object_class_property_add_bool(oc, "secure-boot", best1700_get_secure_boot,

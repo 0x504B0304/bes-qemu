@@ -20,6 +20,8 @@
 #include "hw/qdev-properties.h"
 #include "hw/loader.h"
 #include "exec/address-spaces.h"
+#include "hw/core/cpu.h"
+#include "cpu.h"
 #include "qom/object.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
@@ -41,6 +43,7 @@
 #include "miband_gpu.h"
 #include "miband_bt.h"
 #include "miband_audio_adapter.h"
+#include "miband_net.h"
 #include "miband_binding_ui.h"
 #include "miband_xiaomi_protocol.h"
 
@@ -197,6 +200,7 @@ struct MiBandMachineState {
     const MiBandBoardConfig *board;
     const MiBandFirmwareConfig *firmware;
     bool firmware_selected;
+    char *netdev;
     MiBandBoardPower power;
     MiBandBoardGpioLine panel_te_line;
     uint32_t aon_metal_revision;
@@ -279,12 +283,108 @@ static void miband_workers_reset(void *opaque)
 
 static void miband_aoncmu_reset_request(void *opaque, uint32_t mask)
 {
+    MiBandMachineState *s = opaque;
+    uint32_t pc = 0;
+    uint32_t lr = 0;
+    uint8_t code[64] = { 0 };
+    uint8_t caller[64] = { 0 };
+    char code_hex[sizeof(code) * 2 + 1] = { 0 };
+    char caller_hex[sizeof(caller) * 2 + 1] = { 0 };
+    size_t i;
+
+    if (s->armv7m.cpu) {
+        pc = s->armv7m.cpu->env.regs[15];
+        lr = s->armv7m.cpu->env.regs[14];
+        address_space_read(&address_space_memory, pc & ~1u,
+                           MEMTXATTRS_UNSPECIFIED, code, sizeof(code));
+        address_space_read(&address_space_memory, (lr - 16) & ~1u,
+                           MEMTXATTRS_UNSPECIFIED, caller, sizeof(caller));
+    }
+    for (i = 0; i < sizeof(code); i++) {
+        snprintf(code_hex + i * 2, 3, "%02x", code[i]);
+        snprintf(caller_hex + i * 2, 3, "%02x", caller[i]);
+    }
     qemu_log_mask(LOG_GUEST_ERROR,
                   "miband AON CMU global reset request mask=%08" PRIx32
-                  "\n", mask);
+                  " pc=%08" PRIx32 " lr=%08" PRIx32 "\n", mask, pc, lr);
+    qemu_log_mask(LOG_GUEST_ERROR, "miband reset code pc-64: %s\n", code_hex);
+    qemu_log_mask(LOG_GUEST_ERROR, "miband reset code lr-16: %s\n", caller_hex);
+    if (s->armv7m.cpu) {
+        CPUARMState *env = &s->armv7m.cpu->env;
+        uint32_t spots[2];
+        int slot;
+
+        spots[0] = env->regs[13];
+        spots[1] = env->v7m.other_sp;
+        for (slot = 0; slot < 2; slot++) {
+            uint32_t words[24];
+            char words_hex[sizeof(words) * 8 + 1] = { 0 };
+            size_t w;
+
+            memset(words, 0, sizeof(words));
+            if ((spots[slot] >= AP_RAM_BASE &&
+                 spots[slot] < AP_RAM_BASE + AP_RAM_SIZE) ||
+                (spots[slot] >= AP_RAMX_BASE &&
+                 spots[slot] < AP_RAMX_BASE + AP_RAM_SIZE)) {
+                address_space_read(&address_space_memory, spots[slot],
+                                   MEMTXATTRS_UNSPECIFIED, words, sizeof(words));
+            }
+            for (w = 0; w < ARRAY_SIZE(words); w++) {
+                snprintf(words_hex + w * 8, 9, "%08" PRIx32, words[w]);
+            }
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "miband reset stack[%d] sp=%08" PRIx32 ": %s\n",
+                          slot, spots[slot], words_hex);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "miband reset cfsr=%08" PRIx32 " hfsr=%08" PRIx32
+                      " exc=%" PRIu32 " control=%08" PRIx32 "\n",
+                      env->v7m.cfsr[env->v7m.secure], env->v7m.hfsr,
+                      env->v7m.exception, env->v7m.control[env->v7m.secure]);
+        {
+            static const char *const needles[] = {
+                "PANIC", "Hard Fault", "ssertion", "reboot", "Reboot",
+            };
+            g_autofree uint8_t *buf = g_malloc(0x10000);
+            uint32_t base;
+            int hits = 0;
+            size_t n;
+
+            for (base = 0; base + 0x200 < AP_RAM_SIZE && hits < 10; base += 0x10000) {
+                size_t len = MIN((size_t)0x10000, AP_RAM_SIZE - base);
+                char *p;
+
+                address_space_read(&address_space_memory, AP_RAM_BASE + base,
+                                   MEMTXATTRS_UNSPECIFIED, buf, len);
+                for (n = 0; n < ARRAY_SIZE(needles); n++) {
+                    p = buf;
+                    while (hits < 10 &&
+                           (p = memmem(p, len - (p - (char *)buf),
+                                       needles[n], strlen(needles[n]))) != NULL) {
+                        char text[97];
+                        size_t off = p - (char *)buf;
+                        size_t i2;
+
+                        if (off + 96 > len) {
+                            break;
+                        }
+                        for (i2 = 0; i2 < 96; i2++) {
+                            uint8_t c = buf[off + i2];
+                            text[i2] = (c >= 32 && c < 127) ? c : '.';
+                        }
+                        text[96] = 0;
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "miband RAM %08" PRIx32 ": %s\n",
+                                      AP_RAM_BASE + base + (uint32_t)off, text);
+                        hits++;
+                        p++;
+                    }
+                }
+            }
+        }
+    }
     /* Defer reset to QEMU's runstate loop, matching AIRCR.SYSRESETREQ. */
     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
-    (void)opaque;
 }
 
 static bool miband_mmio_should_log(MiBandMachineState *s, hwaddr address)
@@ -832,6 +932,17 @@ static void miband_init(MachineState *machine)
         miband_bt_start_serial_worker(&s->bt, first_cpu, getenv("MIBAND_HCI_TRACE"));
     }
     s->workers_started = true;
+    /* The BES1503 reports a vendor MIDR at SCB->CPUID (0xE000ED00) rather
+     * than the ARM Cortex-M33 default.  Firmware and trusted modules that
+     * verify the part before enabling debug hardware read it back, so the
+     * machine model exposes the observed value instead of the generic one.
+     * Opt-in: default builds keep the stock CPU model. */
+    {
+        const char *midr = getenv("MIBAND_AP_MIDR");
+        if (midr != NULL && *midr != '\0') {
+            ARM_CPU(first_cpu)->midr = strtoull(midr, NULL, 0);
+        }
+    }
     s->worker_exit.notify = miband_workers_exit;
     qemu_add_exit_notifier(&s->worker_exit);
     qemu_register_reset(miband_workers_reset, s);
@@ -857,6 +968,11 @@ static void miband_init(MachineState *machine)
         armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename,
                            ap_base, AP_FLASH_SIZE - firmware->flash_offset);
     }
+
+    if (s->netdev) {
+        miband_net_machine_init(machine, get_system_memory(), s->netdev,
+                                &error_fatal);
+    }
 }
 
 /* Audio ownership is fixed at startup. Never switch two consumers at runtime. */
@@ -874,6 +990,19 @@ AUDIO_STRING_PROPERTY(audio_device)
 AUDIO_STRING_PROPERTY(audio_shim)
 AUDIO_STRING_PROPERTY(audio_shim_hex)
 #undef AUDIO_STRING_PROPERTY
+
+static char *miband_get_netdev(Object *obj, Error **errp)
+{ return g_strdup(MIBAND_MACHINE(obj)->netdev); }
+static void miband_set_netdev(Object *obj, const char *value, Error **errp)
+{
+    MiBandMachineState *s = MIBAND_MACHINE(obj);
+    if (s->workers_started) {
+        error_setg(errp, "netdev is startup-only");
+        return;
+    }
+    g_free(s->netdev);
+    s->netdev = g_strdup(value);
+}
 
 static bool get_skip_binding(Object *obj, Error **errp)
 { return MIBAND_MACHINE(obj)->diag_skip_binding; }
@@ -1268,6 +1397,8 @@ static char *miband_get_bt_synthetic_pop_ap_packet(Object *obj,
     text[2 + length * 2] = '\0';
     return text;
 }
+
+static int miband_hex_digit(char c);
 
 static void miband_get_bt_synthetic_last_ap_channel(Object *obj, Visitor *v,
                                                      const char *name,
@@ -1993,6 +2124,8 @@ static void miband_class_init(ObjectClass *oc, void *data)
     object_class_property_add_bool(oc, "diag-bypass-binding-auth",
                                   get_bypass_binding_auth, set_bypass_binding_auth);
     object_class_property_add_str(oc, "audio-browser", NULL, set_audio_browser);
+    object_class_property_add_str(oc, "netdev", miband_get_netdev,
+                                  miband_set_netdev);
 
     mc->desc = "BES1503 configurable AP platform (Cortex-M33)";
     mc->init = miband_init;
