@@ -223,6 +223,26 @@ struct MiBandMachineState {
 #define TYPE_MIBAND_MACHINE MACHINE_TYPE_NAME("bes1503")
 OBJECT_DECLARE_SIMPLE_TYPE(MiBandMachineState, MIBAND_MACHINE)
 
+/* MinGW has no memmem(); keep the reset diagnostic portable. */
+static const void *miband_memmem(const void *haystack, size_t haystack_len,
+                                 const void *needle, size_t needle_len)
+{
+    const uint8_t *h = haystack;
+    const uint8_t *n = needle;
+
+    if (needle_len == 0) {
+        return haystack;
+    }
+    while (haystack_len >= needle_len) {
+        if (h[0] == n[0] && memcmp(h, n, needle_len) == 0) {
+            return h;
+        }
+        h++;
+        haystack_len--;
+    }
+    return NULL;
+}
+
 static void miband_workers_exit(Notifier *notifier, void *data)
 {
     MiBandMachineState *s = container_of(notifier, MiBandMachineState, worker_exit);
@@ -359,8 +379,10 @@ static void miband_aoncmu_reset_request(void *opaque, uint32_t mask)
                 for (n = 0; n < ARRAY_SIZE(needles); n++) {
                     p = buf;
                     while (hits < 10 &&
-                           (p = memmem(p, len - (p - (char *)buf),
-                                       needles[n], strlen(needles[n]))) != NULL) {
+                           (p = (char *)miband_memmem(p,
+                                                      len - (p - (char *)buf),
+                                                      needles[n],
+                                                      strlen(needles[n]))) != NULL) {
                         char text[97];
                         size_t off = p - (char *)buf;
                         size_t i2;
