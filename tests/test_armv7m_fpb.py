@@ -67,6 +67,55 @@ fault:
 
 @unittest.skipUnless(os.environ.get('MIBAND_FPB_QEMU'), 'QEMU with FPBv2 is not set')
 class Armv7mFpbTests(unittest.TestCase):
+    def test_vector_and_debug_control_probe_lanes_preserve_interrupt_semantics(self):
+        q = QtestMachine(os.environ['MIBAND_FPB_QEMU'], machine_name='miband-best1502p')
+        self.addCleanup(q.close)
+        for address, value in ((0xe000ed08, 0x20076400), (DEMCR, 0x00010000)):
+            q.write32(address, value)
+            self.assertEqual(int(q.command(f'readw {address:#x}'), 0), value & 0xffff)
+            self.assertEqual(int(q.command(f'readw {address + 2:#x}'), 0), value >> 16)
+
+    def test_halfword_nvic_clear_only_affects_written_lane(self):
+        # IRQs are Secure by default. Execute privileged Secure writes in a
+        # synthetic guest instead of assuming qtest's Non-Secure accesses work.
+        from tests.test_best1700_bth_qtest import BthTests
+        helper = BthTests(methodName='test_default_mode_keeps_legacy_independent_ram')
+        source = r'''
+.syntax unified
+.arch armv8-m.main
+.thumb
+.section .text
+.org 0x100
+    ldr r0, =0xe000e100
+    ldr r1, =0x00020001
+    str r1, [r0]
+    ldr r2, =0xe000e180
+    movs r1, #1
+    strh r1, [r2]
+    ldr r3, =0x20001000
+    ldr r1, [r0]
+    str r1, [r3]
+    movs r1, #2
+    strh r1, [r2, #2]
+    ldr r1, [r0]
+    str r1, [r3, #4]
+    movs r1, #1
+    str r1, [r3, #8]
+1:  b 1b
+'''
+        q = QtestMachine(os.environ['MIBAND_FPB_QEMU'],
+            image_payload=helper.assemble(source, base=0x0c0c0000),
+            machine_options=',boot-sp=0x2015f000,boot-pc=0x0c0c0101',
+            accel='tcg', extra_args=['-S'], machine_name='miband-best1502p')
+        self.addCleanup(q.close)
+        q.qmp('cont')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not q.read32(0x20001008):
+            time.sleep(.01)
+        self.assertEqual(q.read32(0x20001008), 1)
+        self.assertEqual(q.read32(0x20001000), 0x00020000)
+        self.assertEqual(q.read32(0x20001004), 0)
+
     def test_halfword_lanes_key_and_reset(self):
         q = QtestMachine(os.environ['MIBAND_FPB_QEMU'],
                          machine_name='miband-best1502p')

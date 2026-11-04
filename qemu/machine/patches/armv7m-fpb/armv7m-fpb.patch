@@ -275,7 +275,23 @@
          return M_REG_NS;
      case 8 ... 10:
      case 13:
-@@ -2520,6 +2743,9 @@
+@@ -2320,6 +2543,15 @@
+             val = nvic_id[(offset - 0xfe0) >> 2];
+         }
+         break;
++    case 0xd08 ... 0xd0b: /* VTOR: read-only lane selection */
++    case 0xdfc ... 0xdff: /* DEMCR: read-only lane selection */
++        /* Runtime modules probe these registers with two halfword loads.
++         * Keep the secure/user access checks and normal word read semantics.
++         * Do not generalize this to writes: RMW would corrupt W1C/W1S state.
++         */
++        val = nvic_readl(s, offset & ~3u, attrs);
++        val = extract32(val, (offset & 3u) * 8, size * 8);
++        break;
+     default:
+         if (size == 4) {
+             val = nvic_readl(s, offset, attrs);
+@@ -2520,6 +2752,9 @@
      }
  
      nvic_recompute_state(s);
@@ -285,7 +301,7 @@
  
      return 0;
  }
-@@ -2584,13 +2810,19 @@
+@@ -2584,13 +2819,19 @@
  
  static const VMStateDescription vmstate_nvic = {
      .name = "armv7m_nvic",
@@ -306,7 +322,7 @@
          VMSTATE_END_OF_LIST()
      },
      .subsections = (const VMStateDescription*[]) {
-@@ -2602,6 +2834,7 @@
+@@ -2602,6 +2843,7 @@
  static Property props_nvic[] = {
      /* Number of external IRQ lines (so excluding the 16 internal exceptions) */
      DEFINE_PROP_UINT32("num-irq", NVICState, num_irq, 64),
@@ -314,7 +330,7 @@
      DEFINE_PROP_END_OF_LIST()
  };
  
-@@ -2614,6 +2847,12 @@
+@@ -2614,6 +2856,12 @@
      memset(s->sec_vectors, 0, sizeof(s->sec_vectors));
      s->prigroup[M_REG_NS] = 0;
      s->prigroup[M_REG_S] = 0;
@@ -327,7 +343,7 @@
  
      s->vectors[ARMV7M_EXCP_NMI].enabled = 1;
      /* MEM, BUS, and USAGE are enabled through
-@@ -2725,6 +2964,9 @@
+@@ -2725,6 +2973,9 @@
      memory_region_init_io(&s->sysregmem, OBJECT(s), &nvic_sysreg_ops, s,
                            "nvic_sysregs", 0x1000);
      sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sysregmem);
