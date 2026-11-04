@@ -5,6 +5,9 @@ import socket
 import struct
 import time
 import unittest
+from unittest.mock import patch
+import tempfile
+from pathlib import Path
 
 from tests.test_best1700_peripherals_qtest import QtestMachine
 
@@ -85,6 +88,47 @@ class MiBandNetworkTests(unittest.TestCase):
             else:
                 time.sleep(.01)
         self.assertEqual(seen, list(range(12)))
+
+    def test_truncated_tcp_trace_preserves_receive_queue(self):
+        for tracing in (False, True):
+            with self.subTest(tracing=tracing), tempfile.TemporaryDirectory() as temp:
+                with socket.socket() as listener:
+                    listener.bind(('127.0.0.1', 0))
+                    port = listener.getsockname()[1]
+                with patch.dict(os.environ, {'MIBAND_NET_TRACE': str(Path(temp) / 'trace') if tracing else ''}):
+                    q = self.machine(extra_args=['-netdev', f'socket,id=net0,listen=127.0.0.1:{port}'])
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        peer = socket.create_connection(('127.0.0.1', port), timeout=1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.01)
+                with peer:
+                    q.qmp('cont')
+                    for first, length, fragment, tcp_offset in (
+                            (0x4f, 20, 0, 0), (0x45, 20, 0, 0),
+                            (0x45, 40, 0, 0xf0), (0x45, 40, 0x2000, 0x50),
+                            (0x45, 40, 1, 0x50), (0x65, 40, 0, 0x50),
+                            (0x45, 100, 0, 0x50), (0x45, 40, 0, 0x50)):
+                        ip = bytearray(length if length <= 40 else 40)
+                        ip[0] = first
+                        struct.pack_into('!H', ip, 2, length)
+                        struct.pack_into('!H', ip, 6, fragment)
+                        ip[9] = 6
+                        if len(ip) >= 40:
+                            ip[32] = tcp_offset
+                        frame = bytes.fromhex('52540a00020f52550a0002020800') + ip
+                        peer.sendall(struct.pack('!I', len(frame)) + frame)
+                        deadline = time.monotonic() + 3
+                        while not (q.read32(BASE + 8) & 4) and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        self.assertTrue(q.read32(BASE + 8) & 4)
+                        self.assertEqual(q.read(BASE + 0x800, len(ip)), bytes(ip))
+                        q.write32(BASE + 0x1c, 1)
+                q.close()
 
 
 if __name__ == '__main__':

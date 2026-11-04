@@ -392,12 +392,21 @@ static ssize_t miband_net_receive(NetClientState *nc, const uint8_t *buf,
     }
     if (size >= 34) {
         const uint8_t *ip = buf + 14;
-        if (ip[9] == 6) {
-            unsigned ip_hdr = (ip[0] & 0x0f) * 4;
-            unsigned payload = 14 + ip_hdr +
-                    (unsigned)(ip[ip_hdr + 12] >> 4) * 4;
+        unsigned ip_hdr = (ip[0] & 0x0f) * 4;
+        unsigned ip_len = lduw_be_p(ip + 2);
+
+        /* Trace arguments are evaluated even with tracing disabled. Never
+         * interpret fragments or truncated/invalid headers as a TCP segment. */
+        if ((ip[0] >> 4) == 4 && ip_hdr >= 20 && ip_len <= size - 14 &&
+            ip_len >= ip_hdr + 20 && !(lduw_be_p(ip + 6) & 0x3fff) &&
+            ip[9] == 6) {
+            unsigned tcp_hdr = (unsigned)(ip[ip_hdr + 12] >> 4) * 4;
+            unsigned payload = 14 + ip_hdr + tcp_hdr;
             unsigned sport = (unsigned)(ip[ip_hdr] << 8 | ip[ip_hdr + 1]);
 
+            if (tcp_hdr < 20 || tcp_hdr > ip_len - ip_hdr) {
+                goto queue_packet;
+            }
             miband_net_trace("miband-net tcp rx sport=%u dport=%u len=%zu\n",
                              sport,
                              (unsigned)(ip[ip_hdr + 2] << 8 | ip[ip_hdr + 3]),
@@ -408,7 +417,7 @@ static ssize_t miband_net_receive(NetClientState *nc, const uint8_t *buf,
                         ldl_be_p(ip + ip_hdr + 4), ldl_be_p(ip + ip_hdr + 8),
                         ip[ip_hdr + 13]);
             }
-            if (payload + 5 <= size && sport == 443) {
+            if (payload + 5 <= 14 + ip_len && sport == 443) {
                 miband_net_trace(
                         "miband-net tls rx rec=%u ver=%u.%u reclen=%u\n",
                         buf[payload], buf[payload + 1], buf[payload + 2],
@@ -416,6 +425,7 @@ static ssize_t miband_net_receive(NetClientState *nc, const uint8_t *buf,
             }
         }
     }
+queue_packet:
     if (size - 14 > MIBAND_NET_FIFO_SIZE) {
         miband_net_set_error(s, MIBAND_NET_ERR_RX_OVERSIZE);
         s->rx_drops++;
