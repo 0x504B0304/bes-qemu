@@ -2,7 +2,7 @@
   "schema": "bes.qemu-backport.v1",
   "qemu_version": "8.2.10",
   "patch": "armv7m-fpb.patch",
-  "patch_sha256": "3367884766aa4424351614649bc03bb29d42f79ce4da17d98842723a51d6945e",
+  "patch_sha256": "a37d3c6de6c9a4ac737feea32793276737926d1af6535be64686a3451336207c",
   "files": [
     {
       "path": "hw/arm/armv7m.c",
@@ -12,7 +12,7 @@
     {
       "path": "hw/intc/armv7m_nvic.c",
       "before_sha256": "184bf224b075cbf350a7cc2b918ffdf713a5bb3097effd7a42e72ebb973f514c",
-      "after_sha256": "b7a51c0f60e6c65d62e4aac559c26058fd3fa167dccd44968d21255e4950541c"
+      "after_sha256": "09c18b262c8dab96c62656cda4ec59334024f1682ed5043e859d7aa608a1c1ca"
     },
     {
       "path": "include/hw/intc/armv7m_nvic.h",

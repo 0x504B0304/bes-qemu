@@ -11,7 +11,7 @@
          memory_region_init_io(&s->sysreg_ns_mem, OBJECT(s),
 --- a/hw/intc/armv7m_nvic.c
 +++ b/hw/intc/armv7m_nvic.c
-@@ -27,6 +27,172 @@
+@@ -27,6 +27,202 @@
  #include "qemu/log.h"
  #include "qemu/module.h"
  #include "trace.h"
@@ -136,18 +136,33 @@
 +                                 unsigned size, MemTxAttrs attrs)
 +{
 +    NVICState *s = opaque;
++    uint32_t value = 0;
++    unsigned shift;
 +    if (!nvic_fpb_access_ok(s, attrs)) {
 +        return MEMTX_ERROR;
 +    }
-+    *data = 0;
-+    if (offset == 0) {
-+        *data = FPB_CTRL_REV | FPB_CTRL_NUM_CODE |
-+                (s->fpb_ctrl & FPB_CTRL_ENABLE);
-+    } else if (offset == 4) {
-+        *data = (s->fpb_remap & ~0x1fu) | FPB_REMAP_RMPSPT;
-+    } else if (offset >= 8 && offset < 40) {
-+        *data = s->fpb_comp[(offset - 8) / 4];
++    /* The p67 firmware reads LAR/LSR and several FPB registers through a
++     * pair of 16-bit loads. Resolve the containing word, then return the
++     * requested little-endian lane instead of raising an external fault. */
++    if (offset < 0x1000) {
++        hwaddr word_offset = offset & ~3u;
++        if (word_offset == 0) {
++            value = FPB_CTRL_REV | FPB_CTRL_NUM_CODE |
++                    (s->fpb_ctrl & FPB_CTRL_ENABLE);
++        } else if (word_offset == 4) {
++            value = (s->fpb_remap & ~0x1fu) | FPB_REMAP_RMPSPT;
++        } else if (word_offset >= 8 && word_offset < 40) {
++            value = s->fpb_comp[(word_offset - 8) / 4];
++        } else if (word_offset == 0xfb0) {
++            /* LAR: this emulated debug peripheral is permanently unlocked. */
++            value = 0;
++        } else if (word_offset == 0xfb4) {
++            /* LSR: SLI=0, SLK=0, known and unlocked. */
++            value = 0;
++        }
 +    }
++    shift = (unsigned)(offset & 3u) * 8u;
++    *data = size == 2 ? ((value >> shift) & 0xffffu) : value;
 +    return MEMTX_OK;
 +}
 +
@@ -155,20 +170,35 @@
 +                                  unsigned size, MemTxAttrs attrs)
 +{
 +    NVICState *s = opaque;
++    hwaddr word_offset = offset & ~3u;
++    uint32_t current;
++    uint32_t merged;
 +    if (!nvic_fpb_access_ok(s, attrs)) {
 +        return MEMTX_ERROR;
 +    }
-+    if (offset == 0) {
++    if (word_offset == 0) {
++        if (size == 2) {
++            current = FPB_CTRL_REV | FPB_CTRL_NUM_CODE |
++                      (s->fpb_ctrl & FPB_CTRL_ENABLE);
++            merged = (current & ~(0xffffu << ((offset & 3u) * 8u))) |
++                     ((uint32_t)value << ((offset & 3u) * 8u));
++            value = merged;
++        }
 +        /* KEY is required on every FP_CTRL write; it is never stored. */
 +        if (value & FPB_CTRL_KEY) {
 +            s->fpb_ctrl = value & FPB_CTRL_ENABLE;
 +            nvic_fpb_update(s);
 +        }
-+    } else if (offset == 4) {
++    } else if (word_offset == 4) {
++        if (size == 2) {
++            current = s->fpb_remap;
++            value = (current & ~(0xffffu << ((offset & 3u) * 8u))) |
++                    ((uint32_t)value << ((offset & 3u) * 8u));
++        }
 +        s->fpb_remap = value & FPB_REMAP_ADDR_MASK;
 +        s->fpb_remap_valid = true;
-+    } else if (offset >= 8 && offset < 40) {
-+        s->fpb_comp[(offset - 8) / 4] = value &
++    } else if (word_offset >= 8 && word_offset < 40 && size == 4) {
++        s->fpb_comp[(word_offset - 8) / 4] = value &
 +            (FPB_COMP_REPLACE_MASK | FPB_COMP_ADDRESS_MASK | 1u);
 +        nvic_fpb_update(s);
 +    }
@@ -179,12 +209,12 @@
 +    .read_with_attrs = nvic_fpb_read,
 +    .write_with_attrs = nvic_fpb_write,
 +    .endianness = DEVICE_LITTLE_ENDIAN,
-+    .valid = { .min_access_size = 4, .max_access_size = 4, .unaligned = false },
++    .valid = { .min_access_size = 2, .max_access_size = 4, .unaligned = false },
 +};
  
  /* IRQ number counting:
   *
-@@ -189,8 +355,7 @@
+@@ -189,8 +385,7 @@
      case ARMV7M_EXCP_SECURE:
          return true;
      case ARMV7M_EXCP_DEBUG:
@@ -194,7 +224,7 @@
      default:
          /* reset, and reserved (unused) low exception numbers.
           * We'll get called by code that loops through all the exception
-@@ -1240,6 +1405,12 @@
+@@ -1240,6 +1435,12 @@
          return cpu->env.v7m.hfsr;
      case 0xd30: /* Debug Fault Status.  */
          return cpu->env.v7m.dfsr;
@@ -207,7 +237,7 @@
      case 0xd34: /* MMFAR MemManage Fault Address */
          if (!arm_feature(&cpu->env, ARM_FEATURE_M_MAIN)) {
              goto bad_offset;
-@@ -1788,6 +1959,24 @@
+@@ -1788,6 +1989,24 @@
      case 0xd30: /* Debug Fault Status.  */
          cpu->env.v7m.dfsr &= ~value; /* W1C */
          break;
@@ -232,7 +262,7 @@
      case 0xd34: /* Mem Manage Address.  */
          if (!arm_feature(&cpu->env, ARM_FEATURE_M_MAIN)) {
              goto bad_offset;
-@@ -2195,7 +2384,11 @@
+@@ -2195,7 +2414,11 @@
          }
          return M_REG_NS;
      case ARMV7M_EXCP_DEBUG:
@@ -245,7 +275,7 @@
          return M_REG_NS;
      case 8 ... 10:
      case 13:
-@@ -2520,6 +2713,9 @@
+@@ -2520,6 +2743,9 @@
      }
  
      nvic_recompute_state(s);
@@ -255,7 +285,7 @@
  
      return 0;
  }
-@@ -2584,13 +2780,19 @@
+@@ -2584,13 +2810,19 @@
  
  static const VMStateDescription vmstate_nvic = {
      .name = "armv7m_nvic",
@@ -276,7 +306,7 @@
          VMSTATE_END_OF_LIST()
      },
      .subsections = (const VMStateDescription*[]) {
-@@ -2602,6 +2804,7 @@
+@@ -2602,6 +2834,7 @@
  static Property props_nvic[] = {
      /* Number of external IRQ lines (so excluding the 16 internal exceptions) */
      DEFINE_PROP_UINT32("num-irq", NVICState, num_irq, 64),
@@ -284,7 +314,7 @@
      DEFINE_PROP_END_OF_LIST()
  };
  
-@@ -2614,6 +2817,12 @@
+@@ -2614,6 +2847,12 @@
      memset(s->sec_vectors, 0, sizeof(s->sec_vectors));
      s->prigroup[M_REG_NS] = 0;
      s->prigroup[M_REG_S] = 0;
@@ -297,7 +327,7 @@
  
      s->vectors[ARMV7M_EXCP_NMI].enabled = 1;
      /* MEM, BUS, and USAGE are enabled through
-@@ -2725,6 +2934,9 @@
+@@ -2725,6 +2964,9 @@
      memory_region_init_io(&s->sysregmem, OBJECT(s), &nvic_sysreg_ops, s,
                            "nvic_sysregs", 0x1000);
      sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sysregmem);

@@ -58,6 +58,10 @@ class Integration(unittest.TestCase):
             'hw/sd/sd.c': (b'/* SD/MMC */\n', b'/* SD/MMC read-ahead */\n')},
             package_name='sd-read-ahead')
         backport_fixture(root, qemu, {
+            'hw/arm/armv7m.c': (b'/* DWT */\n', b'/* DWT, FPB */\n')},
+            package_name='armv7m-fpb')
+        (qemu / 'hw/arm/armv7m.c').write_bytes(b'/* no DWT */\n')
+        backport_fixture(root, qemu, {
             'hw/sd/sd.c': (b'/* SD/MMC read-ahead */\n', b'/* SD/MMC read-ahead, media events */\n')},
             package_name='sd-media-state')
         backport_fixture(root, qemu, {
