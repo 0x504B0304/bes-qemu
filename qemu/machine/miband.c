@@ -204,6 +204,7 @@ struct MiBandMachineState {
     MiBandBoardPower power;
     MiBandBoardGpioLine panel_te_line;
     uint32_t aon_metal_revision;
+    uint32_t ap_midr;
     char *bt_backend;
     bool bt_synthetic_peer_passive;
     bool bt_rx_flow_control;
@@ -954,16 +955,10 @@ static void miband_init(MachineState *machine)
         miband_bt_start_serial_worker(&s->bt, first_cpu, getenv("MIBAND_HCI_TRACE"));
     }
     s->workers_started = true;
-    /* The BES1503 reports a vendor MIDR at SCB->CPUID (0xE000ED00) rather
-     * than the ARM Cortex-M33 default.  Firmware and trusted modules that
-     * verify the part before enabling debug hardware read it back, so the
-     * machine model exposes the observed value instead of the generic one.
-     * Opt-in: default builds keep the stock CPU model. */
-    {
-        const char *midr = getenv("MIBAND_AP_MIDR");
-        if (midr != NULL && *midr != '\0') {
-            ARM_CPU(first_cpu)->midr = strtoull(midr, NULL, 0);
-        }
+    /* Startup configuration may identify a vendor CPU implementation.
+     * Zero preserves the selected CPU model's default identification. */
+    if (s->ap_midr) {
+        ARM_CPU(first_cpu)->midr = s->ap_midr;
     }
     s->worker_exit.notify = miband_workers_exit;
     qemu_add_exit_notifier(&s->worker_exit);
@@ -1797,6 +1792,23 @@ static void miband_set_pmu_rtc_model(Object *obj, Visitor *v,
     visit_type_bool(v, name, &s->pmu_rtc_model, errp);
 }
 
+static void miband_get_ap_midr(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    visit_type_uint32(v, name, &MIBAND_MACHINE(obj)->ap_midr, errp);
+}
+
+static void miband_set_ap_midr(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    MiBandMachineState *s = MIBAND_MACHINE(obj);
+    if (s->workers_started) {
+        error_setg(errp, "ap-midr is startup-only");
+        return;
+    }
+    visit_type_uint32(v, name, &s->ap_midr, errp);
+}
+
 static void miband_get_aon_metal_revision(Object *obj, Visitor *v,
                                           const char *name, void *opaque,
                                           Error **errp)
@@ -2270,6 +2282,8 @@ static void miband_class_init(ObjectClass *oc, void *data)
     object_class_property_add(oc, "aon-metal-revision", "uint32",
                               miband_get_aon_metal_revision,
                               miband_set_aon_metal_revision, NULL, NULL);
+    object_class_property_add(oc, "ap-midr", "uint32",
+                              miband_get_ap_midr, miband_set_ap_midr, NULL, NULL);
     object_class_property_add(oc, "pmu-rtc-model", "bool",
                               miband_get_pmu_rtc_model,
                               miband_set_pmu_rtc_model, NULL, NULL);

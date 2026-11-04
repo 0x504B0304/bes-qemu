@@ -63,6 +63,20 @@ class RuntimeConfigTests(unittest.TestCase):
         result = self.run_config(configuration(), commands='', guest_bytes=guest)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ap_midr_is_explicit_reset_stable_and_startup_only(self):
+        data = configuration()
+        data['abi'] = 2
+        data['machine_properties'] = {'ap-midr': 0x630f1321}
+        result = self.run_config(data, 'xp /1wx 0xe000ed00\nsystem_reset\nxp /1wx 0xe000ed00\nquit\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.lower().count('0x630f1321'), 2)
+        commands = [dict(execute='qmp_capabilities'),
+            dict(execute='qom-set', arguments=dict(path='/machine', property='ap-midr', value=1)),
+            dict(execute='quit')]
+        result = self.run_config(data, '\n'.join(map(json.dumps, commands))+'\n', qmp=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('startup-only', result.stdout)
+
     def test_rejects_invalid_types_ranges_bindings_and_unknown_keys(self):
         mutations = [('abi', None, 3), ('board', 'width', 0), ('board', 'height', True),
                      ('board', 'touch_reset_gpio', 0), ('board', 'config_sha256', 'bad'),
