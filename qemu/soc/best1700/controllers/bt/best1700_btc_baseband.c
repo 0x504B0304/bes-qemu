@@ -182,12 +182,16 @@ static void baseband_idle_abort_complete(void *opaque)
 {
     Best1700BtcBaseband *s = opaque;
 
-    /* Recheck shared descriptors at execution, not just at command issue.
-     * If a peer queued an activity, leave the request pending instead of
-     * inventing an end event for a radio engine we do not yet implement. */
-    if (!baseband_event_table_idle(s)) {
-        qemu_log_mask(LOG_UNIMP,
-            "best1700 BTC BLE abort stopped at non-idle event table\n");
+    /* A valid abort is a command, not an assertion that every scheduled
+     * activity is already idle. The guest can update the shared table after
+     * issuing it. Keep the request pending until that state is observable;
+     * never turn a busy radio into a synchronous CPU bus fault or invent a
+     * descriptor retirement/end IRQ. Recheck once per modeled half-slot,
+     * rather than spinning at the initial command-consumption tick. */
+    if (s->sleep_state != BEST1700_BTC_AWAKE ||
+        !baseband_event_table_idle(s)) {
+        timer_mod(s->ble_abort_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  HALF_SLOT_HUS * HALF_US_NS);
         return;
     }
     s->ble_abort_pending = 0;
@@ -844,8 +848,7 @@ static MemTxResult baseband_write(void *opaque, hwaddr offset, uint64_t value,
                        (offset == 0x800 ? BLE_IDLE_ABORT_COMMANDS : 0))) ||
             ((value & CORE_RESET) && s->ble_abort_pending) ||
             (offset == 0x800 && (value & BLE_IDLE_ABORT_COMMANDS) &&
-             ((value & CORE_RESET) || s->sleep_state != BEST1700_BTC_AWAKE ||
-              !baseband_event_table_idle(s))) ||
+             (value & CORE_RESET)) ||
             ((value & CORE_RESET) &&
              ((value | s->config[offset / sizeof(uint32_t)]) & (1u << 8)))) {
             /* Only an idle local-core reset is implemented. Reject active

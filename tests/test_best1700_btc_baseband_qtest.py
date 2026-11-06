@@ -144,19 +144,32 @@ class BtcBasebandTests(unittest.TestCase):
             q.step(500)
             self.assertEqual(q.read32(BASEBAND + 0x800), config)
 
-    def test_ble_abort_checks_entire_selected_table_and_rejects_active_state(self):
+    def test_busy_ble_abort_is_accepted_without_fault_or_invented_completion(self):
         q = self.machine()
         config, commands = 0x100707, (1 << 25) | (1 << 24)
         q.write32(BASEBAND + 0x800, config)
-        # Uninitialized, scheduled and active states must not be accepted as idle.
+        # Busy/uninitialized descriptors are not a malformed MMIO command.
+        # Keep it pending, preserve guest state, then complete after the guest
+        # really makes the whole table idle (including its last entry).
         for state in (0, 1, 2, 4, 5, 6, 7):
             for i in range(16):
                 q.write32(0x6d020000 + i * 16, 0x18)
             q.write32(0x6d0200f0, state << 3)
-            q.write32(BASEBAND + 0x800, (config ^ 1) | commands)
-            self.assertEqual(q.read32(BASEBAND + 0x800), config)
+            q.write32(BASEBAND + 0x800, config | commands)
+            self.assertEqual(q.read32(BASEBAND + 0x800), config | commands)
             q.step(500)
+            self.assertEqual(q.read32(BASEBAND + 0x800), config | commands)
+            self.assertEqual(q.read32(0x6d0200f0), state << 3)
+            self.assertEqual(q.read32(BASEBAND + 0x810), 0)
+            q.write32(0x6d0200f0, 0x18)
+            q.step(312_500)
             self.assertEqual(q.read32(BASEBAND + 0x800), config)
+        self.assertNotIn('baseband unsupported', q.stderr_path.read_text(errors='replace'))
+
+    def test_ble_abort_checks_selected_table_and_reset_cancels_pending_work(self):
+        q = self.machine()
+        config, commands = 0x100707, (1 << 25) | (1 << 24)
+        q.write32(BASEBAND + 0x800, config)
         # ET pointer uses halfword units, not bytes or a fixed firmware offset.
         for i in range(16):
             q.write32(0x6d020200 + i * 16, 0x18)
@@ -1029,8 +1042,8 @@ class BtcBasebandTests(unittest.TestCase):
             (0x40C, 0x10016, (0x9, 0x101, 0x200001)),
             (0x428, 0x17C8, (0x4001, 0x80000001)),
             (0x800, 0x00100707, (0x80000001, 0x40000001, 0x10000001,
-                                  0x08000001, 0x04000001, 0x02000001,
-                                  0x01000001, 0x801, 0x11)),
+                                  0x08000001, 0x04000001,
+                                  0x801, 0x11)),
             (0x80C, 0x1017E, (0x201, 0x20001)),
             (0x828, 0x2D0, (0x4001, 0x80000001)),
         )
@@ -1504,6 +1517,38 @@ class BtcBasebandTests(unittest.TestCase):
         for offset, expected in defaults.items():
             self.assertEqual(q.read32(BASEBAND + offset), expected)
         self.assertEqual(q.read32(BASEBAND + 0x18), 0)
+
+    def test_btc_guest_busy_advert_abort_does_not_raise_bus_fault(self):
+        q = self.machine(tcg=True)
+        # Thumb-1 fixture: issue the exact abort that the S5 firmware writes,
+        # read it back and publish a marker. No assembler/toolchain required.
+        code = struct.pack("<10H", 0x4807, 0x4908, 0x6001, 0x6802,
+                           0x4807, 0x6002, 0x4907, 0x6041, 0xbf30, 0xe7fd)
+        code += bytes(0x20 - len(code))
+        code += struct.pack("<4I", BASEBAND + 0x800, 0x02100707,
+                            0x68001000, 0xc0de1234)
+        for i in range(16):
+            q.write32(0x6d020000 + i * 16, 0x18)
+        q.write32(0x6d020000, 0xe73c2802)
+        q.write32(BASEBAND + 0x800, 0x00100707)
+        q.write(0x68004000, code)
+        q.write(0x68002000, struct.pack("<II", 0x68017f00, 0x68004001))
+        q.write32(0x40080168, 0x68002000)
+        q.qmp("cont")
+        q.write32(0x400800cc, 0x88)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if q.read32(0x68001004) == 0xc0de1234:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail(q.diagnostic("BTC faulted on a valid busy advert abort"))
+        q.qmp("stop")
+        self.assertEqual(q.read32(0x68001000), 0x02100707)
+        self.assertEqual(q.read32(0x6d020000), 0xe73c2802)
+        self.assertEqual(q.read32(BASEBAND + 0x810), 0)
+        self.assertNotIn("baseband unsupported",
+                         q.stderr_path.read_text(errors="replace"))
 
     def test_btc_guest_target3_wakes_wfi_and_returns_from_irq1(self):
         code = self.assemble(r"""

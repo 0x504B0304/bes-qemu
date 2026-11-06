@@ -11,6 +11,8 @@
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/qnum.h"
+#include "chardev/char-fe.h"
+#include "chardev/char.h"
 #include "best1700_hifi4_endpoint.h"
 
 static void peer_object_unref(QObject *obj)
@@ -41,6 +43,9 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC(QObject, peer_object_unref)
 #define RPMSGFS_ENOENT 2
 #define RPMSGFS_STAT 20
 #define RPMSGFS_STAT_PATH_OFFSET 104
+#define RPC_FRAME_HEADER 16
+#define RPC_FRAME_LIMIT 4096
+#define RPC_QUEUE_LIMIT (256 * 1024)
 
 #define CONFIG_NUMBERS(F) \
     F(mailbox_ap) F(mailbox_dsp) F(peer_config) F(peer_channels) \
@@ -95,6 +100,11 @@ struct Best1700Hifi4Endpoint {
     unsigned reply_head, reply_count;
     uint64_t fs_rejected;
     uint64_t fs_root_stats;
+    CharBackend rpc;
+    GByteArray *rpc_in, *rpc_out;
+    bool rpc_attached, rpc_connected;
+    uint64_t rpc_rx, rpc_tx;
+    uint32_t rpc_generation;
 };
 
 static void peer_tick(void *opaque);
@@ -184,6 +194,23 @@ static void queue_token(Best1700Hifi4Endpoint *s, uint32_t token)
     }
     s->tokens[(s->token_head + s->token_count) % TOKEN_LIMIT] = token;
     s->token_count++;
+}
+
+static void notify_ring(Best1700Hifi4Endpoint *s, unsigned ring)
+{
+    uint32_t id;
+    /* The AP allocates notify IDs when it configures the resource table.
+     * These are not queue indices: a vdev typically takes ID 0, leaving
+     * IDs 1 and 2 for its rings. A wrong ID can strand an asynchronous
+     * reply until an unrelated guest transmission happens to wake RX. */
+    if (!read32(s, s->rsc + 0x70 + ring * 20, &id)) {
+        return;
+    }
+    if (id != UINT32_MAX && id > 0xff) {
+        fail(s, "guest virtqueue notify ID exceeds IPC token range");
+        return;
+    }
+    queue_token(s, s->cfg.notify_mask | (id & 0xff));
 }
 
 static void send_token(Best1700Hifi4Endpoint *s)
@@ -361,7 +388,7 @@ static bool send_rpmsg(Best1700Hifi4Endpoint *s, uint32_t src, uint32_t dst,
         return false;
     }
     s->rpmsg_tx++;
-    queue_token(s, s->cfg.notify_mask);
+    notify_ring(s, 0);
     return true;
 }
 
@@ -386,6 +413,99 @@ static bool queue_reply(Best1700Hifi4Endpoint *s, uint32_t src, uint32_t dst,
     *reply = (PeerReply) { src, dst, g_memdup2(payload, size), size };
     s->reply_count++;
     return true;
+}
+
+/* Optional host service peer. Frames are little-endian {kind,len,src,dst}.
+ * Kind 1 carries an unmodified RPMsg payload; kind 2 resets the peer. This
+ * transport contains no media RPC semantics or firmware addresses. Writes
+ * never block the emulation thread; bounded queues provide backpressure. */
+static void rpc_flush(Best1700Hifi4Endpoint *s)
+{
+    if (s->rpc_connected && s->rpc_out->len) {
+        int n = qemu_chr_fe_write(&s->rpc, s->rpc_out->data, s->rpc_out->len);
+        if (n > 0) {
+            g_byte_array_remove_range(s->rpc_out, 0, n);
+        }
+    }
+}
+
+static bool rpc_frame(Best1700Hifi4Endpoint *s, uint32_t kind,
+                      uint32_t src, uint32_t dst,
+                      const uint8_t *payload, size_t size)
+{
+    uint8_t header[RPC_FRAME_HEADER];
+    if (!s->rpc_connected || size > RPC_FRAME_LIMIT ||
+        s->rpc_out->len + sizeof(header) + size > RPC_QUEUE_LIMIT) {
+        return false;
+    }
+    stl_le_p(header, kind | (s->rpc_generation << 8));
+    stl_le_p(header + 4, size);
+    stl_le_p(header + 8, src);
+    stl_le_p(header + 12, dst);
+    g_byte_array_append(s->rpc_out, header, sizeof(header));
+    if (size) {
+        g_byte_array_append(s->rpc_out, payload, size);
+    }
+    rpc_flush(s);
+    return true;
+}
+
+static void rpc_receive_frames(Best1700Hifi4Endpoint *s)
+{
+    while (s->rpc_in->len >= RPC_FRAME_HEADER && s->reply_count < REPLY_LIMIT) {
+        uint8_t *data = s->rpc_in->data;
+        uint32_t kind = ldl_le_p(data), size = ldl_le_p(data + 4);
+        uint32_t src = ldl_le_p(data + 8), dst = ldl_le_p(data + 12);
+        if ((kind & 255) != 1 || size > s->cfg.buffer_size - RPMSG_HEADER_SIZE ||
+            src < 1024 || src >= 0xffffff00u ||
+            (dst != RPMSG_NS_ADDRESS && (dst < 1024 || dst >= 0xffffff00u)) ||
+            src == s->cfg.service_address || src == s->cfg.fs_address) {
+            fail(s, "invalid host RPMsg service frame");
+            g_byte_array_set_size(s->rpc_in, 0);
+            return;
+        }
+        if (s->rpc_in->len < RPC_FRAME_HEADER + size) {
+            break;
+        }
+        if ((kind >> 8) != s->rpc_generation) {
+            g_byte_array_remove_range(s->rpc_in, 0, RPC_FRAME_HEADER + size);
+            continue; /* Never inject a pre-reset peer reply into a new guest. */
+        }
+        queue_reply(s, src, dst, data + RPC_FRAME_HEADER, size);
+        s->rpc_rx++;
+        g_byte_array_remove_range(s->rpc_in, 0, RPC_FRAME_HEADER + size);
+    }
+}
+
+static int rpc_can_read(void *opaque)
+{
+    Best1700Hifi4Endpoint *s = opaque;
+    return s->error || s->paused || !s->transport_ready ? 0 :
+           RPC_QUEUE_LIMIT - s->rpc_in->len;
+}
+
+static void rpc_read(void *opaque, const uint8_t *data, int size)
+{
+    Best1700Hifi4Endpoint *s = opaque;
+    g_byte_array_append(s->rpc_in, data, size);
+    rpc_receive_frames(s);
+}
+
+static void rpc_event(void *opaque, QEMUChrEvent event)
+{
+    Best1700Hifi4Endpoint *s = opaque;
+    if (event == CHR_EVENT_OPENED) {
+        s->rpc_connected = true;
+        rpc_frame(s, 2, 0, 0, NULL, 0);
+    } else if (event == CHR_EVENT_CLOSED) {
+        s->rpc_connected = false;
+        g_byte_array_set_size(s->rpc_in, 0);
+        g_byte_array_set_size(s->rpc_out, 0);
+        /* Losing the peer must not leave guest connect/read waiters hung. */
+        if (s->started) {
+            fail(s, "host RPMsg service disconnected");
+        }
+    }
 }
 
 static void send_replies(Best1700Hifi4Endpoint *s)
@@ -507,6 +627,10 @@ static void receive_rpmsg(Best1700Hifi4Endpoint *s)
         if (get_descriptor(s, 1, &desc) <= 0) {
             break;
         }
+        if (s->rpc_attached && s->rpc_out->len + RPC_FRAME_HEADER +
+            desc.length > RPC_QUEUE_LIMIT) {
+            break; /* Leave the descriptor owned by the AP until drained. */
+        }
         message = g_malloc(desc.length);
         if (!read_mem(s, desc.data, message, desc.length)) {
             break;
@@ -542,14 +666,18 @@ static void receive_rpmsg(Best1700Hifi4Endpoint *s)
                 fail(s, "guest audio capability response did not match profile");
             }
         } else {
-            /* Return the consumed buffer, but never invent an RPC result. */
-            s->unsupported++;
+            if (rpc_frame(s, 1, src, dst, payload, size)) {
+                s->rpc_tx++;
+            } else {
+                /* No host service configured: never invent an RPC result. */
+                s->unsupported++;
+            }
         }
         if (!complete_descriptor(s, 1, &desc, desc.length)) {
             break;
         }
         s->rpmsg_rx++;
-        queue_token(s, s->cfg.notify_mask | 1);
+        notify_ring(s, 1);
     }
 }
 
@@ -627,6 +755,11 @@ static void peer_tick(void *opaque)
     }
     if ((status[0] & 4) && ring1 && status[1] == 2) {
         s->transport_ready = true;
+        if (s->rpc_attached) {
+            rpc_flush(s);
+            rpc_receive_frames(s);
+            qemu_chr_fe_accept_input(&s->rpc);
+        }
         receive_rpmsg(s);
         send_replies(s);
         if (!s->ns_sent && !s->error) {
@@ -806,6 +939,20 @@ static bool load_profile(Best1700Hifi4Endpoint *s, const char *profile,
         }
         numeric_fields++;
     }
+    if (qdict_haskey(dict, "media_rpc")) {
+        QDict *rpc = qobject_to(QDict, qdict_get(dict, "media_rpc"));
+        const char *id = rpc ? qdict_get_try_str(rpc, "chardev") : NULL;
+        Chardev *chr = id ? qemu_chr_find(id) : NULL;
+        if (!rpc || qdict_size(rpc) != 1 || !chr) {
+            error_setg(errp, "media_rpc requires an existing chardev");
+            return false;
+        }
+        if (!qemu_chr_fe_init(&s->rpc, chr, errp)) {
+            return false;
+        }
+        s->rpc_attached = true;
+        numeric_fields++;
+    }
     if (qdict_size(dict) != numeric_fields + 5 ||
         !uint_field(memory, "dtcm_base", &dtcm_base, errp) ||
         !uint_field(memory, "dtcm_size", &dtcm_size, errp) ||
@@ -940,9 +1087,15 @@ Best1700Hifi4Endpoint *best1700_hifi4_new(AddressSpace *as,
     s->rx_irq = rx_irq;
     s->done_irq = done_irq;
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_tick, s);
+    s->rpc_in = g_byte_array_new();
+    s->rpc_out = g_byte_array_new();
     if (!load_profile(s, profile_path, audio_image, errp)) {
         best1700_hifi4_free(s);
         return NULL;
+    }
+    if (s->rpc_attached) {
+        qemu_chr_fe_set_handlers(&s->rpc, rpc_can_read, rpc_read, rpc_event,
+                                 NULL, s, NULL, true);
     }
     return s;
 }
@@ -982,6 +1135,10 @@ void best1700_hifi4_reset(Best1700Hifi4Endpoint *s)
     s->remote_service = 0;
     memset(s->fs_clients, 0, sizeof(s->fs_clients));
     clear_replies(s);
+    g_byte_array_set_size(s->rpc_in, 0);
+    g_byte_array_set_size(s->rpc_out, 0);
+    s->rpc_generation = (s->rpc_generation + 1) & 0xffffff;
+    rpc_frame(s, 2, 0, 0, NULL, 0);
     s->resets++;
     write32(s, s->cfg.mailbox_dsp, 0);
     write32(s, s->cfg.peer_channels + 4, 0);
@@ -1011,6 +1168,11 @@ void best1700_hifi4_free(Best1700Hifi4Endpoint *s)
         return;
     }
     timer_free(s->timer);
+    if (s->rpc_attached) {
+        qemu_chr_fe_deinit(&s->rpc, false);
+    }
+    g_byte_array_unref(s->rpc_in);
+    g_byte_array_unref(s->rpc_out);
     g_free(s->resource_template);
     g_free(s->cfg.request);
     g_free(s->cfg.response);
@@ -1069,6 +1231,9 @@ char *best1700_hifi4_status_json(const Best1700Hifi4Endpoint *s)
         qdict_put_int(status, "rpmsg_rx", s->rpmsg_rx);
         qdict_put_int(status, "resets", s->resets);
         qdict_put_int(status, "unsupported", s->unsupported);
+        qdict_put_bool(status, "media_rpc_connected", s->rpc_connected);
+        qdict_put_int(status, "media_rpc_tx", s->rpc_tx);
+        qdict_put_int(status, "media_rpc_rx", s->rpc_rx);
         if (s->cfg.fs_address) {
             unsigned count = 0;
             for (unsigned i = 0; i < FS_ENDPOINT_LIMIT; i++) {

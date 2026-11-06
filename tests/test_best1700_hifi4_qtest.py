@@ -7,6 +7,8 @@ import copy
 import hashlib
 import json
 import os
+import socket
+import time
 from pathlib import Path
 import struct
 import tempfile
@@ -80,10 +82,23 @@ class Hifi4EndpointQtest(unittest.TestCase):
         image = directory / 'audio.bin'
         image.write_bytes(payload)
         config = directory / 'profile.json'
+        extra = []
+        if getattr(self, 'rpc_enabled', False):
+            listener = socket.socket()
+            self.addCleanup(listener.close)
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(1)
+            listener.settimeout(5)
+            self.c['media_rpc'] = {'chardev': 'media-peer'}
+            extra = ['-chardev', 'socket,id=media-peer,host=127.0.0.1,port=%d' % listener.getsockname()[1]]
         config.write_text(json.dumps(self.profile))
         self.q = QtestMachine(os.environ['MIBAND_BEST1700_QEMU'],
-            machine_options=f',audio-image={image},audio-endpoint-profile={config}')
+            machine_options=f',audio-image={image},audio-endpoint-profile={config}', extra_args=extra)
         self.addCleanup(self.q.close)
+        if getattr(self, 'rpc_enabled', False):
+            self.rpc, _ = listener.accept()
+            self.rpc.settimeout(5)
+            self.addCleanup(self.rpc.close)
         self.q.command('irq_intercept_in /machine/core[0]')
         self.avail = [0, 0]
         self.used = [0, 0]
@@ -164,8 +179,9 @@ class Hifi4EndpointQtest(unittest.TestCase):
         self.ack()
         self.notify(self.c['start_token'])
         rsc = self.c['resource_table']
+        self.q.write32(rsc + 0x70, 1)
         self.q.write(rsc + 0x78, struct.pack('<5I', AP_RING, 8,
-                                           self.c['vring_num'], 0xffffffff, 0))
+                                           self.c['vring_num'], 2, 0))
         self.q.write32(rsc + 0x8c, self.c['buffer_size'])
         for _ in range(self.c['vring_num']):
             self.add_buffer(0)
@@ -356,6 +372,88 @@ class EmptyFilesystemQtest(Hifi4EndpointQtest):
         self.assertEqual(self.status()['filesystem_root_stats'], 0)
         self.assertEqual(self.status()['filesystem_rejected'], 5)
 
+
+
+class Hifi4RpcQtest(Hifi4EndpointQtest):
+    rpc_enabled = True
+
+    def test_async_reply_notifies_allocated_ring_id_without_guest_tx(self):
+        self.bind()
+        ns = b's:md:audio:2c'.ljust(32, b'\0') + struct.pack('<II', 0x950, 0)
+        self.deliver(0x950, 0x35, ns)
+        while True:
+            tag, _, _, _ = self.rpc_frame()
+            if tag & 255 == 1:
+                break
+        # Drain prior IPC notifications, without generating a new guest packet.
+        for _ in range(32):
+            if not self.q.read32(SET) & 0x200:
+                break
+            self.ack()
+        self.assertFalse(self.q.read32(SET) & 0x200)
+        self.q.write32(self.c['resource_table'] + 0x70, 7)
+        data = b'asynchronous media reply'
+        self.rpc.sendall(struct.pack('<4I', (tag & ~255) | 1,
+                                     len(data), 0x6000, 0x950) + data)
+        self.wait_rpc(1)
+        self.q.step(1_000_000)
+        self.assertTrue(self.q.irq(76))
+        self.assertEqual(self.q.read32(self.c['peer_records'] + 8),
+                         self.c['notify_mask'] | 7)
+        self.assertEqual(self.take(), (0x6000, 0x950, data))
+
+    def rpc_frame(self):
+        def read(n):
+            result = bytearray()
+            while len(result) < n:
+                data = self.rpc.recv(n - len(result))
+                self.assertTrue(data, 'media peer disconnected')
+                result.extend(data)
+            return bytes(result)
+        tag, size, src, dst = struct.unpack('<4I', read(16))
+        return tag, src, dst, read(size)
+
+    def wait_rpc(self, count):
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            self.q.step(1_000_000)
+            if self.status()['media_rpc_rx'] >= count:
+                return
+            time.sleep(.01)
+        self.fail('host peer packet was not delivered')
+
+    def test_rpc_uses_guest_rings_in_both_directions(self):
+        self.bind()
+        self.deliver(0x401, self.c['service_address'], bytes.fromhex(self.c['response_hex']))
+        data = b's:md:audio:2c'.ljust(32, b'\0') + struct.pack('<II', 0x950, 0)
+        self.deliver(0x950, 0x35, data)
+        while True:
+            tag, src, dst, actual = self.rpc_frame()
+            if tag & 255 == 1:
+                break
+        self.assertEqual((src, dst, actual), (0x950, 0x35, data))
+        reply = data[:32] + struct.pack('<II', 0x6000, 2)
+        packet = struct.pack('<4I', tag, len(reply), 0x6000, 0x35) + reply
+        self.rpc.sendall(packet[:9])
+        self.q.step(1_000_000)
+        self.assertEqual(self.status()['media_rpc_rx'], 0)
+        self.rpc.sendall(packet[9:])
+        self.wait_rpc(1)
+        self.assertEqual(self.take(), (0x6000, 0x35, reply))
+        self.assertTrue(self.status()['ready'])
+
+    def test_rpc_rejects_reserved_endpoint_and_oversized_payload(self):
+        self.bind()
+        tag, _, _, _ = self.rpc_frame()
+        self.rpc.sendall(struct.pack('<4I', (tag & ~255) | 1, 0,
+                                     self.c['service_address'], 0x900))
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            self.q.step(1_000_000)
+            if self.status()['state'] == 'failed':
+                break
+            time.sleep(.01)
+        self.assertIn('invalid host RPMsg', self.status().get('error', ''))
 
 if __name__ == '__main__':
     unittest.main()

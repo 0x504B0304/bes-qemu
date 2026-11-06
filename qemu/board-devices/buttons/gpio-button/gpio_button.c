@@ -68,7 +68,6 @@ static void gpio_button_realize(DeviceState *dev, Error **errp)
 
 static void gpio_button_unrealize(DeviceState *dev)
 {
-    GpioButtonState *s = MIBAND_GPIO_BUTTON(dev);
     qemu_unregister_reset(gpio_button_system_reset, dev);
     miband_keyboard_unregister(dev);
     gpio_button_reset(dev);

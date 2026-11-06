@@ -90,6 +90,28 @@ class BtcSleepTests(unittest.TestCase):
         self.assertEqual(q.read32(IRQ_STATUS), mask)
         self.assertEqual(q.irq(1), bool(mask))
 
+    def test_ble_abort_waits_for_sleep_correction_without_radio_completion(self):
+        q = self.machine()
+        config, advert = 0x100707, 1 << 25
+        for i in range(16):
+            q.write32(0x6d020000 + i * 16, 0x18)
+        q.write32(MAC + 0x800, config)
+        self.start(q, 32)
+        q.write32(MAC + 0x800, config | advert)
+        q.step(500)
+        self.assertEqual(q.read32(MAC + 0x800), config | advert)
+        q.step(999_500)
+        self.assertEqual(q.read32(MAC + 0x800), config | advert)
+        q.write32(IRQ_ACK, WAKE_IRQ)
+        self.correct(q, slots=3, fine=499, iso_us=1000)
+        q.step(CORRECTION_NS * 2)
+        self.assertEqual(q.read32(MAC + 0x800), config)
+        self.assertEqual(q.read32(MAC + 0x810), 0)
+        for i in range(16):
+            self.assertEqual(q.read32(0x6d020000 + i * 16), 0x18)
+        self.assertNotIn('baseband unsupported',
+                         q.stderr_path.read_text(errors='replace'))
+
     def test_correction_latency_rejects_invalid_startup_and_runtime_changes(self):
         for latency in (0, 1_000_000_001):
             result = subprocess.run([os.environ['MIBAND_BEST1700_QEMU'],
@@ -191,7 +213,10 @@ class BtcSleepTests(unittest.TestCase):
                 q = self.machine(lpo_hz=frequency)
                 q.write32(IRQ_ENABLE, WAKE_IRQ)
                 self.start(q, count)
-                q.step(deadline - 1)
+                # The full-width count advances about 37 virtual hours and
+                # also dispatches periodic machine timers. Allow host time
+                # for that work without changing the deadline assertions.
+                q.step(deadline - 1, timeout=30 if count == 0xFFFFFFFF else 5)
                 self.assert_pending(q, 0)
                 self.assertTrue(q.read32(SLEEP_CONTROL) & SLEEPING)
                 q.step(1)

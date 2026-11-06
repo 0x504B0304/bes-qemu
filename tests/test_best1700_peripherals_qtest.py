@@ -84,7 +84,7 @@ class QtestMachine:
             self.lines.put(line.rstrip())
         self.lines.put(None)
 
-    def command(self, line):
+    def command(self, line, *, timeout=5):
         try:
             self.process.stdin.write(line + "\n")
             self.process.stdin.flush()
@@ -92,7 +92,7 @@ class QtestMachine:
             raise RuntimeError(self.diagnostic(line)) from error
         while True:
             try:
-                response = self.lines.get(timeout=5)
+                response = self.lines.get(timeout=timeout)
             except queue.Empty as error:
                 raise TimeoutError(self.diagnostic(line)) from error
             if response is None:
@@ -123,8 +123,8 @@ class QtestMachine:
     def read(self, address, size):
         return bytes.fromhex(self.command(f"read {address:#x} {size}")[2:])
 
-    def step(self, nanoseconds):
-        self.command(f"clock_step {nanoseconds}")
+    def step(self, nanoseconds, *, timeout=5):
+        self.command(f"clock_step {nanoseconds}", timeout=timeout)
 
     def irq(self, number):
         # Synchronize qtest's asynchronous notifications. This observes the
