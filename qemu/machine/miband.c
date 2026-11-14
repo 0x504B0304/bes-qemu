@@ -192,9 +192,11 @@ struct MiBandMachineState {
     uint32_t bt_passkey;
     uint32_t bt_le_passkey;
     bool gpadc_model;
+    uint32_t gpadc_input_mv[7];
     bool pmu_status_model;
     bool pmu_rtc_model;
     bool charger_model;
+    bool charger_hp4560x;
     uint32_t charger_i2c_bus;
     uint32_t display_width, display_height;
     const MiBandBoardConfig *board;
@@ -276,6 +278,7 @@ static void miband_workers_reset(void *opaque)
     miband_audio_adapter_reset(&s->audio_adapter);
     miband_dma_async_reset(&s->dma);
     miband_ispi_gpadc_reset(&s->ispi);
+    miband_ispi_power_reset(&s->ispi);
     miband_lcdc_async_reset(&s->lcdc);
     miband_gpu_async_reset(&s->gpu);
     miband_charger_reset(&s->charger);
@@ -560,6 +563,19 @@ static void miband_init(MachineState *machine)
     if (s->charger_model && !s->gpadc_model) {
         error_setg(&error_fatal, "charger-model requires gpadc-model=on for battery and thermistor samples");
     }
+    for (unsigned channel = 0; channel < ARRAY_SIZE(s->gpadc_input_mv); channel++) {
+        if (s->gpadc_input_mv[channel] == UINT32_MAX) {
+            continue;
+        }
+        if (!s->gpadc_model) {
+            error_setg(&error_fatal, "gpadc-mv%u requires gpadc-model=on", channel);
+        }
+        if (s->charger_model &&
+            (channel == s->board->battery_channel ||
+             (s->board->thermistor_mask & (1u << channel)))) {
+            error_setg(&error_fatal, "gpadc-mv%u overlaps board power input", channel);
+        }
+    }
 
     if (s->flash_worker) {
         error_setg(&error_fatal, "flash-worker is gated: firmware WIP/OIP and durable completion ordering are not verified");
@@ -784,6 +800,9 @@ static void miband_init(MachineState *machine)
     miband_i2c_init(s->i2c);
     miband_charger_init(&s->charger, s->charger_model, 75, false,
                          s->board->charger_probe_revision, 0x1e);
+    if (s->charger_hp4560x) {
+        miband_charger_select_hp4560x(&s->charger);
+    }
     s->i2c[s->charger_i2c_bus].charger = &s->charger;
     s->i2c[5].probe_address = s->i2c5_probe_address;
     s->i2c[5].probe_chip_id = s->i2c5_probe_chip_id;
@@ -818,6 +837,11 @@ static void miband_init(MachineState *machine)
     s->i2c[2].probe_register0 = s->i2c2_probe_register0;
     miband_timers_init(s->timers);
     miband_ispi_init(&s->ispi);
+    for (unsigned channel = 0; channel < ARRAY_SIZE(s->gpadc_input_mv); channel++) {
+        if (s->gpadc_input_mv[channel] != UINT32_MAX) {
+            miband_ispi_set_analog_mv(&s->ispi, channel, s->gpadc_input_mv[channel]);
+        }
+    }
     miband_ispi_set_gpadc_model(&s->ispi, s->gpadc_model);
     miband_ispi_set_pmu_status_model(&s->ispi, s->pmu_status_model);
     miband_ispi_set_pmu_rtc_model(&s->ispi, s->pmu_rtc_model);
@@ -1853,7 +1877,27 @@ static void miband_set_charger_model(Object *obj, Visitor *v,
     visit_type_bool(v, name, &s->charger_model, errp);
 }
 
-/* Board wiring; the SC7061 itself has no SoC MMIO base. */
+static char *miband_get_charger_kind(Object *obj, Error **errp)
+{
+    return g_strdup(MIBAND_MACHINE(obj)->charger_hp4560x ? "hp4560x" : "sc7061");
+}
+
+static void miband_set_charger_kind(Object *obj, const char *value, Error **errp)
+{
+    MiBandMachineState *s = MIBAND_MACHINE(obj);
+
+    if (s->workers_started) {
+        error_setg(errp, "charger-kind is startup-only");
+        return;
+    }
+    if (g_strcmp0(value, "hp4560x") && g_strcmp0(value, "sc7061")) {
+        error_setg(errp, "charger-kind must be sc7061 or hp4560x");
+        return;
+    }
+    s->charger_hp4560x = !g_strcmp0(value, "hp4560x");
+}
+
+/* Board wiring; the external charger has no SoC MMIO base. */
 static void miband_get_charger_i2c_bus(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
                                        Error **errp)
@@ -2183,6 +2227,8 @@ static void miband_class_init(ObjectClass *oc, void *data)
     object_class_property_add(oc, "charger-i2c-bus", "uint32",
                               miband_get_charger_i2c_bus,
                               miband_set_charger_i2c_bus, NULL, NULL);
+    object_class_property_add_str(oc, "charger-kind", miband_get_charger_kind,
+                                  miband_set_charger_kind);
     object_class_property_add_str(oc, "board-config-sha256",
                                   miband_get_board_config_sha256, NULL);
     object_class_property_add_str(oc, "board-profile",
@@ -2301,9 +2347,46 @@ static void miband_class_init(ObjectClass *oc, void *data)
                               miband_set_i2c2_probe_register0, NULL, NULL);
 }
 
+static void miband_get_gpadc_input(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    MiBandMachineState *s = MIBAND_MACHINE(obj);
+    unsigned channel = (uintptr_t)opaque;
+
+    visit_type_uint32(v, name, &s->gpadc_input_mv[channel], errp);
+}
+
+static void miband_set_gpadc_input(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    MiBandMachineState *s = MIBAND_MACHINE(obj);
+    unsigned channel = (uintptr_t)opaque;
+    uint32_t value;
+
+    if (s->workers_started) {
+        error_setg(errp, "%s is startup-only", name);
+        return;
+    }
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value > 1800 && value != UINT32_MAX) {
+        error_setg(errp, "%s must be 0..1800 mV or 4294967295 (default)", name);
+        return;
+    }
+    s->gpadc_input_mv[channel] = value;
+}
+
 static void miband_instance_init(Object *obj)
 {
     MiBandMachineState *s = MIBAND_MACHINE(obj);
+    for (unsigned channel = 0; channel < ARRAY_SIZE(s->gpadc_input_mv); channel++) {
+        g_autofree char *name = g_strdup_printf("gpadc-mv%u", channel);
+
+        s->gpadc_input_mv[channel] = UINT32_MAX;
+        object_property_add(obj, name, "uint32", miband_get_gpadc_input,
+                            miband_set_gpadc_input, NULL, (void *)(uintptr_t)channel);
+    }
     miband_select_board(s, &miband_boards[0]);
     miband_set_firmware_profile(obj, MIBAND_DEFAULT_FIRMWARE_ID, &error_fatal);
     s->firmware_selected = false;

@@ -16,6 +16,7 @@ typedef struct MiBandChargerSignals {
 typedef struct MiBandCharger {
     MiBandChargerSignals signals;
     bool enabled;
+    bool hp4560x;
     unsigned level;
     bool charging;
     uint8_t probe_revision;
@@ -36,6 +37,7 @@ void miband_charger_init(MiBandCharger *charger, bool enabled,
                          uint8_t device_id);
 void miband_charger_connect(MiBandCharger *charger,
                              const MiBandChargerSignals *signals);
+void miband_charger_select_hp4560x(MiBandCharger *charger);
 bool miband_charger_apply(MiBandCharger *charger, unsigned level,
                           bool charging);
 /* Chip reset keeps the externally supplied battery and cable conditions. */

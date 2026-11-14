@@ -64,18 +64,28 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_ap_midr_is_explicit_reset_stable_and_startup_only(self):
+        from tests.test_best1700_peripherals_qtest import QtestMachine
+
         data = configuration()
         data['abi'] = 2
         data['machine_properties'] = {'ap-midr': 0x630f1321}
-        result = self.run_config(data, 'xp /1wx 0xe000ed00\nsystem_reset\nxp /1wx 0xe000ed00\nquit\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.lower().count('0x630f1321'), 2)
-        commands = [dict(execute='qmp_capabilities'),
-            dict(execute='qom-set', arguments=dict(path='/machine', property='ap-midr', value=1)),
-            dict(execute='quit')]
-        result = self.run_config(data, '\n'.join(map(json.dumps, commands))+'\n', qmp=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('startup-only', result.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'hardware.json'
+            config.write_text(json.dumps(data), encoding='utf-8')
+            machine = QtestMachine(os.environ['MIBAND_QEMU'], machine_name='bes1503',
+                machine_options=',hardware-config=' + str(config),
+                image_payload=bytes.fromhex('fee7'), serial_backends=('none', 'none'))
+            self.addCleanup(machine.close)
+            # Structured QMP avoids the stdio monitor's startup line-editor
+            # race, which can discard the first byte of pre-buffered HMP input.
+            for reset in (False, True):
+                if reset:
+                    machine.qmp('system_reset')
+                output = machine.qmp('human-monitor-command',
+                    {'command-line': 'xp /1wx 0xe000ed00'})
+                self.assertIn('0x630f1321', output.lower())
+            with self.assertRaisesRegex(RuntimeError, 'startup-only'):
+                machine.qmp('qom-set', dict(path='/machine', property='ap-midr', value=1))
 
     def test_rejects_invalid_types_ranges_bindings_and_unknown_keys(self):
         mutations = [('abi', None, 3), ('board', 'width', 0), ('board', 'height', True),

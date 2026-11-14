@@ -1,0 +1,18 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "clock-notify-empty.patch",
+  "patch_sha256": "f01fb02f342bfaabd487fe91b05dddd51e76cde273fefc737c28bd65ead9d4d3",
+  "files": [
+    {
+      "path": "util/qemu-timer.c",
+      "before_sha256": "d8d36c0447c52f00c1ba24334217ce7e5b31b820faae40029c472c1afeef0530",
+      "after_sha256": "7323e5b8a273ac222056ae6e288f2b5eaf50c330d23b38f3464680d7fa963004"
+    },
+    {
+      "path": "tests/unit/test-aio.c",
+      "before_sha256": "c5ffaa6297aae928f3b16fd69a5d50afc0bc9809c10ba5b0b47cd167cbead712",
+      "after_sha256": "ade0d7bdc28b9d1fc10898ab26efc61bad18b3f577c9b6ca65b323d5759f3525"
+    }
+  ]
+}

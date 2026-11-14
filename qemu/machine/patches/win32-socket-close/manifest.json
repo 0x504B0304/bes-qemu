@@ -1,0 +1,18 @@
+{
+  "schema": "bes.qemu-backport.v1",
+  "qemu_version": "8.2.10",
+  "patch": "win32-socket-close.patch",
+  "patch_sha256": "230431e08dda1d1e78413575584fb891662e4649a5d020a77477e9aaf7ca0931",
+  "files": [
+    {
+      "path": "util/oslib-win32.c",
+      "before_sha256": "04cc871b949a70981fd4c9a2080393e452bbb85d13a69990566202cebd3709ea",
+      "after_sha256": "1aa43d4f58cc5968fcf5b0d83db7e6033d2222daab7d52bec3695619792bc667"
+    },
+    {
+      "path": "tests/unit/test-io-channel-socket.c",
+      "before_sha256": "82b699d738750d26c7410849044926f81a300ac1b473430f2de6393d12480de2",
+      "after_sha256": "9a25843c95f1294affc505cbb63ebdbe467d0d506d634e63c7da8bea29f29c09"
+    }
+  ]
+}

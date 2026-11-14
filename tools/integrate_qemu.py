@@ -70,6 +70,10 @@ def install(qemu, root=ROOT):
         ('sd-media-state', 'SD/eMMC media state'),
         ('vnc-refresh-60hz', 'VNC 60 Hz refresh'),
         ('win32-timer-resolution', 'Win32 timer resolution'),
+        ('win32-socket-watch', 'Win32 socket watch readiness'),
+        ('win32-socket-close', 'Win32 socket handle cleanup'),
+        ('win32-socket-poll', 'Win32 socket readiness fallback'),
+        ('clock-notify-empty', 'Clock notification'),
     ])
     for destination, content in upstream_updates:
         destination.write_bytes(content)

@@ -43,6 +43,7 @@ typedef struct MiBandIspi {
     bool gpadc_model;
     bool pmu_status_model;
     bool pmu_rtc_model;
+    bool poweroff_requested;
     struct MiBandCharger *charger;
     qemu_irq pmu_irq;
     int64_t rtc_base_seconds;
@@ -188,6 +189,7 @@ bool miband_timer_write(MiBandTimer timers[MIBAND_TIMER_COUNT], hwaddr address,
 void miband_ispi_init(MiBandIspi *ispi);
 void miband_ispi_shutdown(MiBandIspi *ispi);
 void miband_ispi_gpadc_reset(MiBandIspi *ispi);
+void miband_ispi_power_reset(MiBandIspi *ispi);
 void miband_ispi_set_gpadc_model(MiBandIspi *ispi, bool enabled);
 void miband_ispi_set_analog_mv(MiBandIspi *ispi, unsigned channel, unsigned mv);
 void miband_ispi_set_pmu_status_model(MiBandIspi *ispi, bool enabled);

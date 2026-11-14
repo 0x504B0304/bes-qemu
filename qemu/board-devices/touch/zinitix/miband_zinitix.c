@@ -76,14 +76,30 @@ void miband_zinitix_reset_line(void *opaque, bool driven, bool high)
 
 static void zinitix_command(MiBandZinitix *touch)
 {
+    if (touch->sleeping || touch->reg == 5 || touch->reg == 4 ||
+        touch->reg == 0xff8) {
+        qemu_log_mask(LOG_UNIMP,
+                      "miband Zinitix command=%04x sleeping=%u queued=%u "
+                      "gesture=%u contact=%u first_tap=%u virtual_ms=%" PRId64 "\n",
+                      touch->reg, touch->sleeping, touch->count,
+                      touch->gesture_pending, touch->gesture_contact,
+                      touch->first_tap, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+    }
     switch (touch->reg) {
     case 0: /* SWRESET */
         miband_zinitix_reset(touch);
         break;
     case 3: /* CLEAR_INT_STATUS: read does not consume the contact. */
+        /* Ordinary report acknowledgement does not end the physical tap.
+         * The AP may acknowledge both halves of the first tap just before
+         * entering gesture sleep. Only an actual wake acknowledgement clears
+         * that history; otherwise a double tap spanning SLEEP becomes single.
+         */
+        if (touch->sleep_gesture != 1 || touch->gesture_pending) {
+            touch->gesture_contact = false;
+            touch->first_tap = false;
+        }
         touch->gesture_pending = 0;
-        touch->gesture_contact = false;
-        touch->first_tap = false;
         if (touch->irq_asserted && touch->count) {
             touch->head = (touch->head + 1) % MIBAND_ZINITIX_QUEUE_LENGTH;
             touch->count--;
@@ -101,8 +117,10 @@ static void zinitix_command(MiBandZinitix *touch)
         touch->sleeping = true;
         timer_del(touch->next_report);
         touch->gesture_pending = 0;
-        touch->gesture_contact = false;
-        touch->first_tap = false;
+        if (touch->sleep_gesture != 1) {
+            touch->gesture_contact = false;
+            touch->first_tap = false;
+        }
         zinitix_irq(touch, false);
         break;
     case 4: /* WAKEUP */
@@ -205,8 +223,10 @@ static void zinitix_stop(void *opaque)
                                   "miband Zinitix gesture ack status=%u\n",
                                   touch->gesture_pending);
                 }
+                if (touch->sleep_gesture != 1 || touch->gesture_pending) {
+                    touch->gesture_contact = touch->first_tap = false;
+                }
                 touch->gesture_pending = 0;
-                touch->gesture_contact = touch->first_tap = false;
                 zinitix_irq(touch, false);
             }
             if (touch->reg == 0xaf) {
@@ -256,6 +276,16 @@ void miband_zinitix_report_clocked(void *opaque, uint16_t x, uint16_t y,
 {
     MiBandZinitix *touch = opaque;
     uint8_t *report;
+    qemu_log_mask(LOG_UNIMP,
+                  "miband Zinitix input event=%u x=%u y=%u sleeping=%u "
+                  "reset=%u queued=%u gesture=%u contact=%u first_tap=%u "
+                  "clock=%u input_ns=%" PRId64 " virtual_ns=%" PRId64
+                  " down_ns=%" PRId64 " up_ns=%" PRId64 "\n",
+                  event, x, y, touch->sleeping, touch->reset_asserted,
+                  touch->count, touch->gesture_pending, touch->gesture_contact,
+                  touch->first_tap, clock, qemu_clock_get_ns(clock),
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), touch->tap_down_ns,
+                  touch->tap_up_ns);
     if (touch->reset_asserted) {
         return;
     }
@@ -264,10 +294,15 @@ void miband_zinitix_report_clocked(void *opaque, uint16_t x, uint16_t y,
         touch->gesture_contact = touch->first_tap = false;
         touch->gesture_clock = clock;
     }
-    if (touch->sleeping && touch->sleep_gesture == 1) {
+    if (touch->sleep_gesture == 1) {
         /* Command5 arms double tap; the board-selected status at 0x126
          * is consumed and cleared over I2C. Timing/distance thresholds are
-         * an explicit recognizer approximation, not measured silicon data. */
+         * an explicit recognizer approximation, not measured silicon data.
+         * Track physical taps while awake as well: the display can be blank
+         * before the AP sends SLEEP. A report ACK or mode switch must not split
+         * a valid host double tap. Only sleep emits a gesture, and wake/reset
+         * still clear the recognizer; ordinary awake reports remain queued.
+         */
         int64_t now = qemu_clock_get_ns(clock);
         if (touch->gesture_pending) {
             return;
@@ -290,7 +325,7 @@ void miband_zinitix_report_clocked(void *opaque, uint16_t x, uint16_t y,
                 touch->gesture_contact = touch->first_tap = false;
             } else if (event == 8) {
                 touch->gesture_contact = false;
-                if (touch->first_tap) {
+                if (touch->first_tap && touch->sleeping) {
                     touch->first_tap = false;
                     touch->gesture_pending = touch->double_tap_status;
                     zinitix_irq(touch, true);
@@ -303,7 +338,9 @@ void miband_zinitix_report_clocked(void *opaque, uint16_t x, uint16_t y,
                 }
             }
         }
-        return;
+        if (touch->sleeping) {
+            return;
+        }
     }
     if (touch->sleeping && (touch->registers[0xaf] & 0x12)) {
         /* In gesture mode a contact is a wake indication, not a queued UI

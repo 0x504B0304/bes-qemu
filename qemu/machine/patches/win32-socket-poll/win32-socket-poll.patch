@@ -1,0 +1,136 @@
+--- a/io/channel-watch.c
++++ b/io/channel-watch.c
+@@ -38,6 +38,7 @@
+     QIOChannel *ioc;
+     SOCKET socket;
+     int revents;
++    gint64 next_check;
+     GIOCondition condition;
+ };
+ 
+@@ -98,10 +99,18 @@
+ 
+ #ifdef CONFIG_WIN32
+ static gboolean
+-qio_channel_socket_source_prepare(GSource *source G_GNUC_UNUSED,
++qio_channel_socket_source_prepare(GSource *source,
+                                   gint *timeout)
+ {
+-    *timeout = -1;
++    QIOChannelSocketSource *ssource = (QIOChannelSocketSource *)source;
++    gint64 remaining = ssource->next_check - g_get_monotonic_time();
++
++    /* The auto-reset socket event is shared by watches and may also be
++     * observed by an old context during a chardev context handoff. Bound
++     * level-readiness checks so a consumed notification cannot stall IO.
++     */
++    *timeout = !ssource->condition ? -1 :
++        remaining > 0 ? (remaining + 999) / 1000 : 0;
+ 
+     return FALSE;
+ }
+@@ -118,13 +127,15 @@
+     QIOChannelSocketSource *ssource = (QIOChannelSocketSource *)source;
+     fd_set rfds, wfds, xfds;
+ 
+-    /* The main context checks every source after unrelated timer wakeups.
+-     * Avoid select() while holding the BQL when no socket event occurred.
+-     * Shared read/write watches still need select() to filter readiness.
+-     */
+-    if (!ssource->condition || !ssource->fd.revents) {
++    gint64 now = g_get_monotonic_time();
++
++    /* Immediate event notifications remain cheap. Without one, poll at most
++     * every 10 ms rather than on every virtual-timer/vCPU wakeup. */
++    if (!ssource->condition ||
++        (!ssource->fd.revents && now < ssource->next_check)) {
+         return 0;
+     }
++    ssource->next_check = now + 10 * 1000;
+ 
+     FD_ZERO(&rfds);
+     FD_ZERO(&wfds);
+@@ -299,6 +310,7 @@
+     ssource->condition = condition;
+     ssource->socket = _get_osfhandle(sockfd);
+     ssource->revents = 0;
++    ssource->next_check = 0;
+ 
+     ssource->fd.fd = (gintptr)ioc->event;
+     ssource->fd.events = G_IO_IN;
+--- a/tests/unit/test-io-channel-socket.c
++++ b/tests/unit/test-io-channel-socket.c
+@@ -702,6 +702,64 @@
+ }
+ #endif
+ 
++
++static gboolean test_socket_observe_watch(QIOChannel *ioc, GIOCondition condition,
++                                         gpointer opaque)
++{
++    bool *observed = opaque;
++    g_assert_true(condition & G_IO_IN);
++    *observed = true;
++    return G_SOURCE_REMOVE;
++}
++
++static void test_io_channel_socket_context_handoff(void)
++{
++    SocketAddress *listen_addr = g_new0(SocketAddress, 1);
++    SocketAddress *connect_addr = g_new0(SocketAddress, 1);
++    QIOChannel *src, *dst, *srv;
++    GMainContext *first = g_main_context_new();
++    GMainContext *next = g_main_context_new();
++    GSource *observer, *reader;
++    TestSocketWatchData data = { 0 };
++    bool observed = false;
++    int64_t end;
++
++    listen_addr->type = connect_addr->type = SOCKET_ADDRESS_TYPE_INET;
++    listen_addr->u.inet.host = g_strdup("127.0.0.1");
++    connect_addr->u.inet.host = g_strdup("127.0.0.1");
++    test_io_channel_setup_sync(listen_addr, connect_addr, &srv, &src, &dst);
++    qio_channel_set_blocking(dst, false, &error_abort);
++    qio_channel_set_blocking(src, false, &error_abort);
++    observer = qio_channel_create_watch(dst, G_IO_IN);
++    g_source_set_callback(observer, (GSourceFunc)test_socket_observe_watch,
++                          &observed, NULL);
++    g_source_attach(observer, first);
++    reader = qio_channel_create_watch(dst, G_IO_IN);
++    g_source_set_callback(reader, (GSourceFunc)test_socket_read_watch, &data, NULL);
++    g_source_attach(reader, next);
++    g_main_context_iteration(next, false);
++    g_assert_cmpuint(data.bytes, ==, 0);
++    qio_channel_write_all(src, "a", 1, &error_abort);
++    end = g_get_monotonic_time() + G_TIME_SPAN_SECOND;
++    while (!observed && g_get_monotonic_time() < end) {
++        g_main_context_iteration(first, false);
++        g_usleep(1000);
++    }
++    g_assert_true(observed);
++    /* The first context consumed the socket's auto-reset notification but
++     * deliberately did not consume its data. The new reader must still see
++     * the already readable channel without another write from the peer. */
++    test_socket_watch_wait(next, &data, 1, false);
++    g_source_destroy(observer); g_source_unref(observer);
++    g_source_destroy(reader); g_source_unref(reader);
++    qio_channel_close(src, &error_abort);
++    qio_channel_close(dst, &error_abort);
++    qio_channel_close(srv, &error_abort);
++    object_unref(OBJECT(src)); object_unref(OBJECT(dst)); object_unref(OBJECT(srv));
++    g_main_context_unref(first); g_main_context_unref(next);
++    qapi_free_SocketAddress(listen_addr); qapi_free_SocketAddress(connect_addr);
++}
++
+ int main(int argc, char **argv)
+ {
+     bool has_ipv4, has_ipv6, has_afunix;
+@@ -723,6 +781,8 @@
+     }
+ 
+     if (has_ipv4) {
++        g_test_add_func("/io/channel/socket/context-handoff",
++                        test_io_channel_socket_context_handoff);
+ #ifdef CONFIG_WIN32
+         g_test_add_func("/io/channel/socket/close-handle",
+                         test_io_channel_socket_close_handle);

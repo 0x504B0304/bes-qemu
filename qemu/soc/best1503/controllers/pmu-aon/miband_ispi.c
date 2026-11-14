@@ -3,6 +3,7 @@
 #include "qemu/cutils.h"
 #include "hw/core/cpu.h"
 #include "sysemu/rtc.h"
+#include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
 #include "miband_peripherals.h"
 #include "miband_charger.h"
@@ -51,6 +52,7 @@
 #define GPADC_REG_STATUS_CLR 0x51
 #define GPADC_REG_CH_DATA    0x56
 #define GPADC_START          (1U << 5)
+#define PMU_SOFT_POWER_OFF   (1U << 0)
 #define PMU_CHARGER_ENABLE   0x05
 #define PMU_UNIFIED_ENABLE   0x40
 #define PMU_CHARGER_STATUS   0x5e
@@ -134,6 +136,12 @@ void miband_ispi_gpadc_reset(MiBandIspi *ispi)
     ispi->gpadc_valid = 0;
     ispi->regs[ISPI_PMU_CS][0][GPADC_REG_START] &= ~GPADC_START;
     ispi_pmu_update_irq(ispi);
+}
+
+void miband_ispi_power_reset(MiBandIspi *ispi)
+{
+    ispi->poweroff_requested = false;
+    ispi->regs[ISPI_PMU_CS][0][GPADC_REG_START] &= ~PMU_SOFT_POWER_OFF;
 }
 
 void miband_ispi_connect_pmu_irq(MiBandIspi *ispi, qemu_irq irq)
@@ -519,6 +527,17 @@ bool miband_ispi_write(MiBandIspi *ispi, hwaddr address, unsigned size,
         }
         ispi_trace(ispi, "write", value);
         ispi->rx_data = 0;
+        /* BEST1503 ROM's PMU shutdown sets page-0 register 0x4f bit 0.
+         * Bit 5 independently starts GPADC; other pages/chip selects must
+         * retain ordinary register semantics. Let QEMU's main loop remove
+         * power instead of reaching the ROM's failed-shutdown reset fallback.
+         * Do not reset or tear down the guest from this MMIO callback. */
+        if (ispi->chip_select == ISPI_PMU_CS && page == 0 &&
+            reg == GPADC_REG_START && (data & PMU_SOFT_POWER_OFF) &&
+            !ispi->poweroff_requested) {
+            ispi->poweroff_requested = true;
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        }
     }
     ispi->rx_ready = true;
     return true;

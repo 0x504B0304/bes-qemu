@@ -1,0 +1,172 @@
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -143,7 +143,15 @@
+     QEMUTimerList *timer_list;
+     QEMUClock *clock = qemu_clock_ptr(type);
+     QLIST_FOREACH(timer_list, &clock->timerlists, list) {
+-        timerlist_notify(timer_list);
++        /* Diagnostic experiment only: retain the main loop wakeup, but
++         * do not wake another context if it has no timer on this clock.
++         * Concurrent insertion rearms the list through timerlist_rearm().
++         * This variant is not a qualified product change.
++         */
++        if (timer_list == main_loop_tlg.tl[type] ||
++            timerlist_has_timers(timer_list)) {
++            timerlist_notify(timer_list);
++        }
+     }
+ }
+ 
+--- a/tests/unit/test-aio.c
++++ b/tests/unit/test-aio.c
+@@ -887,6 +887,141 @@
+     qemu_thread_join(&worker_thread);
+     g_assert(aio_poll(ctx, true));
+     g_assert(!aio_poll(ctx, false));
++}
++
++/* A clock tick must wake armed contexts, including a concurrently rearmed
++ * previously empty context.  Empty contexts need no clock-driven wakeup.
++ */
++typedef struct NotifyEmptyTest {
++    QEMUTimerListGroup tlg;
++    QEMUTimer timer;
++    QemuSemaphore notify;
++    QemuSemaphore fired;
++    int notifications[QEMU_CLOCK_MAX];
++    int callbacks;
++} NotifyEmptyTest;
++
++static void notify_empty_count(void *opaque, QEMUClockType type)
++{
++    NotifyEmptyTest *data = opaque;
++    qatomic_inc(&data->notifications[type]);
++}
++
++static void notify_empty_fired(void *opaque)
++{
++    NotifyEmptyTest *data = opaque;
++    qatomic_inc(&data->callbacks);
++}
++
++static void test_clock_notify_empty(void)
++{
++    NotifyEmptyTest data = { 0 };
++    int type;
++
++    timerlistgroup_init(&data.tlg, notify_empty_count, &data);
++    for (type = 0; type < QEMU_CLOCK_MAX; type++) {
++        qemu_clock_notify(type);
++        g_assert_cmpint(data.notifications[type], ==, 0);
++    }
++    timerlistgroup_deinit(&data.tlg);
++    while (g_main_context_iteration(NULL, false)) {
++    }
++}
++
++static void test_clock_notify_armed(void)
++{
++    NotifyEmptyTest data = { 0 };
++    int type, before;
++
++    timerlistgroup_init(&data.tlg, notify_empty_count, &data);
++    for (type = 0; type < QEMU_CLOCK_MAX; type++) {
++        timer_init_full(&data.timer, &data.tlg, type, SCALE_NS, 0,
++                        notify_empty_fired, &data);
++        /* Future timers need clock notification too; expired-only filtering
++         * would change the API and is deliberately not used.
++         */
++        timer_mod_ns(&data.timer, INT64_MAX / 2);
++        before = data.notifications[type];
++        qemu_clock_notify(type);
++        g_assert_cmpint(data.notifications[type], ==, before + 1);
++        timer_del(&data.timer);
++        before = data.notifications[type];
++        qemu_clock_notify(type);
++        g_assert_cmpint(data.notifications[type], ==, before);
++        timer_deinit(&data.timer);
++    }
++
++    timer_init_full(&data.timer, &data.tlg, QEMU_CLOCK_VIRTUAL, SCALE_NS,
++                    0, notify_empty_fired, &data);
++    timer_mod_ns(&data.timer, 0);
++    qemu_clock_enable(QEMU_CLOCK_VIRTUAL, true);
++    g_assert(timerlist_run_timers(data.tlg.tl[QEMU_CLOCK_VIRTUAL]));
++    g_assert_cmpint(data.callbacks, ==, 1);
++    before = data.notifications[QEMU_CLOCK_VIRTUAL];
++    qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
++    g_assert_cmpint(data.notifications[QEMU_CLOCK_VIRTUAL], ==, before);
++    qemu_clock_enable(QEMU_CLOCK_VIRTUAL, false);
++    timer_del(&data.timer);
++    timer_deinit(&data.timer);
++    timerlistgroup_deinit(&data.tlg);
++    while (g_main_context_iteration(NULL, false)) {
++    }
++}
++
++static void notify_empty_thread_wake(void *opaque, QEMUClockType type)
++{
++    NotifyEmptyTest *data = opaque;
++    qemu_sem_post(&data->notify);
++}
++
++static void notify_empty_thread_fired(void *opaque)
++{
++    NotifyEmptyTest *data = opaque;
++    qatomic_inc(&data->callbacks);
++    qemu_sem_post(&data->fired);
++}
++
++static void *notify_empty_consumer(void *opaque)
++{
++    NotifyEmptyTest *data = opaque;
++    while (qatomic_read(&data->callbacks) < 2000) {
++        g_assert_cmpint(qemu_sem_timedwait(&data->notify, 2000), ==, 0);
++        timerlist_run_timers(data->tlg.tl[QEMU_CLOCK_REALTIME]);
++    }
++    return NULL;
++}
++
++static void test_clock_notify_rearm(void)
++{
++    NotifyEmptyTest data = { 0 };
++    QemuThread worker;
++    int i;
++
++    qemu_sem_init(&data.notify, 0);
++    qemu_sem_init(&data.fired, 0);
++    timerlistgroup_init(&data.tlg, notify_empty_thread_wake, &data);
++    timer_init_full(&data.timer, &data.tlg, QEMU_CLOCK_REALTIME, SCALE_NS,
++                    0, notify_empty_thread_fired, &data);
++    qemu_thread_create(&worker, "clock-consumer", notify_empty_consumer,
++                       &data, QEMU_THREAD_JOINABLE);
++    for (i = 0; i < 2000; i++) {
++        /* The consumer is allowed to sleep after an empty-list clock tick.
++         * Inserting the new earliest timer must independently wake it.
++         */
++        qemu_clock_notify(QEMU_CLOCK_REALTIME);
++        timer_mod_ns(&data.timer, 0);
++        qemu_clock_notify(QEMU_CLOCK_REALTIME);
++        g_assert_cmpint(qemu_sem_timedwait(&data.fired, 2000), ==, 0);
++        g_assert_cmpint(qatomic_read(&data.callbacks), ==, i + 1);
++    }
++    qemu_thread_join(&worker);
++    timer_del(&data.timer);
++    timer_deinit(&data.timer);
++    timerlistgroup_deinit(&data.tlg);
++    qemu_sem_destroy(&data.notify);
++    qemu_sem_destroy(&data.fired);
++    while (g_main_context_iteration(NULL, false)) {
++    }
+ }
+ 
+ /* End of tests.  */
+@@ -929,5 +1064,8 @@
+     g_test_add_func("/aio-gsource/event/wait/no-flush-cb",  test_source_wait_event_notifier_noflush);
+     g_test_add_func("/aio-gsource/event/flush",             test_source_flush_event_notifier);
+     g_test_add_func("/aio-gsource/timer/schedule",          test_source_timer_schedule);
++    g_test_add_func("/aio/clock-notify/empty", test_clock_notify_empty);
++    g_test_add_func("/aio/clock-notify/armed", test_clock_notify_armed);
++    g_test_add_func("/aio/clock-notify/rearm", test_clock_notify_rearm);
+     return g_test_run();
+ }

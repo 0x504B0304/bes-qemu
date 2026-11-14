@@ -1,0 +1,67 @@
+--- a/util/oslib-win32.c
++++ b/util/oslib-win32.c
+@@ -524,7 +524,11 @@
+     __except1 {
+     }
+ 
+-    if (!SetHandleInformation((HANDLE)s, flags, flags)) {
++    /* Only the protection bit was changed above. Using the old flags as the
++     * mask leaves PROTECT_FROM_CLOSE set when it was originally clear, so
++     * closesocket() cannot release the underlying handle.
++     */
++    if (!SetHandleInformation((HANDLE)s, HANDLE_FLAG_PROTECT_FROM_CLOSE, flags)) {
+         errno = EACCES;
+         return -1;
+     }
+--- a/tests/unit/test-io-channel-socket.c
++++ b/tests/unit/test-io-channel-socket.c
+@@ -670,6 +670,38 @@
+     }
+ }
+ 
++
++#ifdef CONFIG_WIN32
++static void test_io_channel_socket_close_handle(void)
++{
++    for (unsigned inherit = 0; inherit < 2; inherit++) {
++        int fd = socket(AF_INET, SOCK_STREAM, 0);
++        SOCKET raw = _get_osfhandle(fd);
++        DWORD before, after;
++
++        g_assert_cmpint(fd, >=, 0);
++        g_assert_true(SetHandleInformation((HANDLE)raw, HANDLE_FLAG_INHERIT,
++            inherit ? HANDLE_FLAG_INHERIT : 0));
++        g_assert_true(GetHandleInformation((HANDLE)raw, &before));
++        g_assert_false(before & HANDLE_FLAG_PROTECT_FROM_CLOSE);
++        /* Releasing the CRT descriptor must leave the socket available for
++         * closesocket(), with its original inheritance/protection flags. */
++        g_assert_cmpint(qemu_close_socket_osfhandle(fd), ==, 0);
++        g_assert_true(GetHandleInformation((HANDLE)raw, &after));
++        g_assert_cmpuint(after, ==, before);
++        g_assert_cmpint(closesocket(raw), ==, 0);
++        g_assert_false(GetHandleInformation((HANDLE)raw, &after));
++
++        /* The ordinary close wrapper must release both resources as well. */
++        fd = socket(AF_INET, SOCK_STREAM, 0);
++        g_assert_cmpint(fd, >=, 0);
++        raw = _get_osfhandle(fd);
++        g_assert_cmpint(close(fd), ==, 0);
++        g_assert_false(GetHandleInformation((HANDLE)raw, &after));
++    }
++}
++#endif
++
+ int main(int argc, char **argv)
+ {
+     bool has_ipv4, has_ipv6, has_afunix;
+@@ -691,6 +723,10 @@
+     }
+ 
+     if (has_ipv4) {
++#ifdef CONFIG_WIN32
++        g_test_add_func("/io/channel/socket/close-handle",
++                        test_io_channel_socket_close_handle);
++#endif
+         g_test_add_func("/io/channel/socket/watch-readiness",
+                         test_io_channel_socket_watch);
+         g_test_add_func("/io/channel/socket/ipv4-sync",

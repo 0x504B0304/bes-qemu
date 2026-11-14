@@ -1,5 +1,5 @@
 /*
- * External SC7061 charger subset observed in this firmware.
+ * External SC7061 and HP4560X charger subsets observed in firmware.
  *
  * The register bus and firmware-tested status fields are modeled here. This
  * does not emulate charge chemistry, a charge timer, or unobserved fault bits.
@@ -26,6 +26,12 @@
 #define SC7061_REG_CONTROL 0x1d
 #define SC7061_DISABLE_CHARGING (1u << 6)
 
+#define HP4560X_REG_RESET   0x02
+#define HP4560X_REG_STATUS  0x08
+#define HP4560X_REG_FAULT   0x09
+#define HP4560X_REG_ID      0x0a
+#define HP4560X_REG_IRQ     0x1e
+
 void miband_charger_connect(MiBandCharger *charger,
                              const MiBandChargerSignals *signals)
 {
@@ -36,6 +42,12 @@ void miband_charger_connect(MiBandCharger *charger,
 
 static void charger_refresh_status(MiBandCharger *charger)
 {
+    if (charger->hp4560x) {
+        /* Input present (bit 1), power good (bit 2), no charge fault.
+         * Charge disable is independently readable in register 1. */
+        charger->registers[HP4560X_REG_STATUS] = charger->charging ? 6 : 0;
+        return;
+    }
     bool charge_enabled = !(charger->registers[SC7061_REG_CONTROL] &
                             SC7061_DISABLE_CHARGING);
 
@@ -45,6 +57,11 @@ static void charger_refresh_status(MiBandCharger *charger)
 
 static void charger_refresh(MiBandCharger *charger)
 {
+    if (charger->hp4560x) {
+        charger->registers[HP4560X_REG_ID] = 0xe0;
+        charger_refresh_status(charger);
+        return;
+    }
     charger->registers[SC7061_REG_PROBE] = charger->probe_revision;
     charger->registers[SC7061_REG_FAMILY] = 0;
     charger->registers[SC7061_REG_ID] = charger->device_id;
@@ -83,6 +100,13 @@ void miband_charger_init(MiBandCharger *charger, bool enabled,
                   charger->charging);
 }
 
+void miband_charger_select_hp4560x(MiBandCharger *charger)
+{
+    charger->hp4560x = true;
+    miband_charger_reset(charger);
+    qemu_log_mask(LOG_UNIMP, "miband charger selected model=HP4560X-subset\n");
+}
+
 bool miband_charger_apply(MiBandCharger *charger, unsigned level,
                           bool charging)
 {
@@ -92,7 +116,7 @@ bool miband_charger_apply(MiBandCharger *charger, unsigned level,
         return false;
     }
     cable_changed = charger->charging != charging;
-    if (cable_changed) {
+    if (cable_changed && !charger->hp4560x) {
         charger->registers[SC7061_REG_IRQ] |= SC7061_PG_IRQ;
     }
     charger->level = level;
@@ -115,6 +139,19 @@ static void charger_write(MiBandCharger *charger, uint8_t reg, uint8_t value)
     if (charger->trace_events++ < 256) {
         qemu_log_mask(LOG_UNIMP,
                       "miband charger write reg=%02x value=%02x\n", reg, value);
+    }
+    if (charger->hp4560x) {
+        if (reg == HP4560X_REG_RESET && (value & 0x80)) {
+            /* Software reset retains cable/ADC inputs and the I2C pointer. */
+            memset(charger->registers, 0, sizeof(charger->registers));
+            charger_refresh(charger);
+        } else if (reg == HP4560X_REG_IRQ) {
+            charger->registers[reg] &= ~value;
+        } else if (reg != HP4560X_REG_ID && reg != HP4560X_REG_STATUS &&
+                   reg != HP4560X_REG_FAULT) {
+            charger->registers[reg] = value;
+        }
+        return;
     }
     /* Configuration readback is retained. Side effects are implemented only
      * where established by the original driver and the transaction trace. */

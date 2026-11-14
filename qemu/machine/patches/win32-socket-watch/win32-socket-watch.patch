@@ -1,0 +1,143 @@
+--- a/io/channel-watch.c
++++ b/io/channel-watch.c
+@@ -118,7 +118,11 @@
+     QIOChannelSocketSource *ssource = (QIOChannelSocketSource *)source;
+     fd_set rfds, wfds, xfds;
+ 
+-    if (!ssource->condition) {
++    /* The main context checks every source after unrelated timer wakeups.
++     * Avoid select() while holding the BQL when no socket event occurred.
++     * Shared read/write watches still need select() to filter readiness.
++     */
++    if (!ssource->condition || !ssource->fd.revents) {
+         return 0;
+     }
+ 
+--- a/tests/unit/test-io-channel-socket.c
++++ b/tests/unit/test-io-channel-socket.c
+@@ -560,6 +560,116 @@
+ }
+ 
+ 
++typedef struct TestSocketWatchData {
++    unsigned bytes;
++    unsigned writable;
++    bool eof;
++} TestSocketWatchData;
++
++static gboolean test_socket_read_watch(QIOChannel *ioc, GIOCondition condition,
++                                      gpointer opaque)
++{
++    TestSocketWatchData *data = opaque;
++    char value;
++    ssize_t count = qio_channel_read(ioc, &value, 1, &error_abort);
++
++    g_assert_cmpint(count, >=, 0);
++    if (!count) {
++        data->eof = true;
++        return G_SOURCE_REMOVE;
++    }
++    g_assert_cmpint(value, ==, 'a' + data->bytes);
++    data->bytes++;
++    return G_SOURCE_CONTINUE;
++}
++
++static gboolean test_socket_write_watch(QIOChannel *ioc, GIOCondition condition,
++                                       gpointer opaque)
++{
++    TestSocketWatchData *data = opaque;
++
++    g_assert(condition & G_IO_OUT);
++    data->writable++;
++    return G_SOURCE_REMOVE;
++}
++
++static void test_socket_watch_wait(GMainContext *context,
++                                  TestSocketWatchData *data,
++                                  unsigned bytes, bool eof)
++{
++    int64_t end = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
++
++    while ((data->bytes < bytes || data->eof != eof) &&
++           g_get_monotonic_time() < end) {
++        g_main_context_iteration(context, false);
++        g_usleep(1000);
++    }
++    g_assert_cmpuint(data->bytes, ==, bytes);
++    g_assert_cmpint(data->eof, ==, eof);
++}
++
++static void test_io_channel_socket_watch(void)
++{
++    /* Exercise shared read/write events, partial reads, watch reattachment
++     * with pending data, peer close, and a new connection after cleanup. */
++    for (unsigned attempt = 0; attempt < 2; attempt++) {
++        SocketAddress *listen_addr = g_new0(SocketAddress, 1);
++        SocketAddress *connect_addr = g_new0(SocketAddress, 1);
++        QIOChannel *src, *dst, *srv;
++        GMainContext *context = g_main_context_new();
++        GSource *reader, *writer;
++        TestSocketWatchData data = { 0 };
++
++        listen_addr->type = connect_addr->type = SOCKET_ADDRESS_TYPE_INET;
++        listen_addr->u.inet.host = g_strdup("127.0.0.1");
++        connect_addr->u.inet.host = g_strdup("127.0.0.1");
++        test_io_channel_setup_sync(listen_addr, connect_addr, &srv, &src, &dst);
++        qio_channel_set_blocking(dst, false, &error_abort);
++        qio_channel_set_blocking(src, false, &error_abort);
++        reader = qio_channel_create_watch(dst, G_IO_IN | G_IO_HUP);
++        g_source_set_callback(reader, (GSourceFunc)test_socket_read_watch,
++                              &data, NULL);
++        g_source_attach(reader, context);
++        writer = qio_channel_create_watch(dst, G_IO_OUT);
++        g_source_set_callback(writer, (GSourceFunc)test_socket_write_watch,
++                              &data, NULL);
++        g_source_attach(writer, context);
++
++        /* Unrelated main-context wakeups must not dispatch a readable watch. */
++        for (unsigned n = 0; n < 100; n++) {
++            g_main_context_iteration(context, false);
++            g_usleep(1000);
++        }
++        g_assert_cmpuint(data.bytes, ==, 0);
++        g_assert_cmpuint(data.writable, ==, 1);
++        qio_channel_write_all(src, "abcdefgh", 8, &error_abort);
++        test_socket_watch_wait(context, &data, 8, false);
++        g_source_destroy(reader);
++        g_source_unref(reader);
++        qio_channel_write_all(src, "ij", 2, &error_abort);
++        g_usleep(10000);
++        reader = qio_channel_create_watch(dst, G_IO_IN | G_IO_HUP);
++        g_source_set_callback(reader, (GSourceFunc)test_socket_read_watch,
++                              &data, NULL);
++        g_source_attach(reader, context);
++        test_socket_watch_wait(context, &data, 10, false);
++        qio_channel_shutdown(src, QIO_CHANNEL_SHUTDOWN_WRITE, &error_abort);
++        test_socket_watch_wait(context, &data, 10, true);
++        qio_channel_close(src, &error_abort);
++        g_source_destroy(reader);
++        g_source_unref(reader);
++        g_source_unref(writer);
++        qio_channel_close(dst, &error_abort);
++        qio_channel_close(srv, &error_abort);
++        object_unref(OBJECT(src));
++        object_unref(OBJECT(dst));
++        object_unref(OBJECT(srv));
++        g_main_context_unref(context);
++        qapi_free_SocketAddress(listen_addr);
++        qapi_free_SocketAddress(connect_addr);
++    }
++}
++
+ int main(int argc, char **argv)
+ {
+     bool has_ipv4, has_ipv6, has_afunix;
+@@ -581,6 +691,8 @@
+     }
+ 
+     if (has_ipv4) {
++        g_test_add_func("/io/channel/socket/watch-readiness",
++                        test_io_channel_socket_watch);
+         g_test_add_func("/io/channel/socket/ipv4-sync",
+                         test_io_channel_ipv4_sync);
+         g_test_add_func("/io/channel/socket/ipv4-async",

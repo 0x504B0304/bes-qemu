@@ -70,9 +70,55 @@ class Integration(unittest.TestCase):
         backport_fixture(root, qemu, {
             'os-win32.c': (b'/* default timer */\n', b'/* 1 ms timer */\n')},
             package_name='win32-timer-resolution')
+        backport_fixture(root, qemu, {
+            'io/channel-watch.c': (b'/* poll every source */\n', b'/* socket event readiness */\n'),
+            'tests/unit/test-io-channel-socket.c': (b'/* socket tests */\n', b'/* socket watch tests */\n')},
+            package_name='win32-socket-watch')
+        backport_fixture(root, qemu, {
+            'util/oslib-win32.c': (b'/* protected socket */\n', b'/* restored socket flags */\n'),
+            'tests/unit/test-io-channel-socket.c': (b'/* socket watch tests */\n', b'/* socket watch and close tests */\n')},
+            package_name='win32-socket-close')
+        backport_fixture(root, qemu, {
+            'io/channel-watch.c': (b'/* socket event readiness */\n', b'/* bounded socket readiness */\n'),
+            'tests/unit/test-io-channel-socket.c': (b'/* socket watch and close tests */\n', b'/* socket handoff tests */\n')},
+            package_name='win32-socket-poll')
+        backport_fixture(root, qemu, {
+            'util/qemu-timer.c': (b'/* notify all timer lists */\n', b'/* notify main or armed timer lists */\n'),
+            'tests/unit/test-aio.c': (b'/* AIO tests */\n', b'/* AIO and clock notification tests */\n')},
+            package_name='clock-notify-empty')
+        (qemu / 'io/channel-watch.c').write_bytes(b'/* poll every source */\n')
+        (qemu / 'tests/unit/test-io-channel-socket.c').write_bytes(b'/* socket tests */\n')
         (qemu / 'hw/sd/sd.c').write_bytes(b'/* SD */\n')
         (qemu / 'accel/tcg/cputlb.c').write_bytes(b'/* section index */\n')
         return root, qemu
+
+    def test_clock_package_in_active_complete_stack(self):
+        # Call the actual product entry: a test-local appended package would
+        # hide an accidental omission from the default integration stack.
+        anchor = "arm_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m.c'))\n"
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as temp:
+                root, qemu = self.fixture(temp, anchor)
+                timer = qemu / 'util/qemu-timer.c'
+                if conflict:
+                    timer.write_bytes(b'/* unrelated local timer edit */\n')
+                before = {p.relative_to(qemu): p.read_bytes()
+                          for p in qemu.rglob('*') if p.is_file()}
+                if conflict:
+                    with self.assertRaisesRegex(ValueError, 'Clock notification backport conflict'):
+                        install(qemu, root)
+                    self.assertEqual(before, {p.relative_to(qemu): p.read_bytes()
+                                             for p in qemu.rglob('*') if p.is_file()})
+                else:
+                    install(qemu, root)
+                    self.assertEqual(timer.read_bytes(), b'/* notify main or armed timer lists */\n')
+                    self.assertEqual((qemu / 'tests/unit/test-aio.c').read_bytes(),
+                                     b'/* AIO and clock notification tests */\n')
+                    installed = {p.relative_to(qemu): p.read_bytes()
+                                 for p in qemu.rglob('*') if p.is_file()}
+                    install(qemu, root)
+                    self.assertEqual(installed, {p.relative_to(qemu): p.read_bytes()
+                                                for p in qemu.rglob('*') if p.is_file()})
 
     def test_pristine_and_existing_integration_are_idempotent(self):
         anchor = "arm_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m.c'))\n"
@@ -138,6 +184,19 @@ class Integration(unittest.TestCase):
             self.assertFalse((qemu/'hw/arm/miband.c').exists())
             self.assertEqual((qemu/'hw/arm/meson.build').read_text(), anchor)
             self.assertEqual((qemu/'hw/arm/Kconfig').read_bytes(), original_config)
+
+    def test_socket_close_conflict_prevents_all_integration_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            anchor = "arm_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m.c'))\n"
+            root, qemu = self.fixture(temp, anchor)
+            (qemu/'util/oslib-win32.c').write_bytes(b'/* local socket changes */\n')
+            with self.assertRaisesRegex(ValueError, 'Win32 socket handle cleanup backport conflict'):
+                install(qemu, root)
+            self.assertEqual((qemu/'tests/unit/test-io-channel-socket.c').read_bytes(),
+                             b'/* socket tests */\n')
+            self.assertEqual((qemu/'io/channel-watch.c').read_bytes(), b'/* poll every source */\n')
+            self.assertFalse((qemu/'hw/arm/miband.c').exists())
+            self.assertEqual((qemu/'hw/arm/meson.build').read_text(), anchor)
 
 
 if __name__ == '__main__':
