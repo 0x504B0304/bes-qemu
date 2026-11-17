@@ -92,8 +92,10 @@ MiBandStore *miband_store_open_geometry(const char *path,const uint8_t base[32],
     s->lock=g_open(lock_path,O_RDWR|O_CREAT|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
     g_free(lock_path);
     if (s->lock<0 || bes_file_lock(s->lock)) fail("state is locked or inaccessible");
-    s->fd=g_open(path,O_RDWR|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
     uint8_t header[64]={0},*nor=g_malloc(nor_bytes);
+    /* Test errno immediately after open. In particular Bionic's allocator
+     * may change errno even when allocation succeeds. */
+    s->fd=g_open(path,O_RDWR|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
     if (s->fd<0 && errno==ENOENT) {
         s->fd=g_open(path,O_RDWR|O_CREAT|O_EXCL|O_BINARY|O_CLOEXEC|O_NOFOLLOW,0600);
         if (s->fd<0) fail("cannot create state");

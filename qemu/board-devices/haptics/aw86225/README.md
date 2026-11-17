@@ -28,6 +28,10 @@ unsupported reads return 0xff and log the gap. Migration is explicitly disabled.
 
 Read-only QOM counters `ram-writes`, `ram-reads`, `plays`, `completions` and
 `calibrations` expose actual I2C/timer activity, and reset with the device.
+`last-duration-ns` reports the most recent finite waveform duration (or a
+bounded 100 ms hint for an indefinite play) so the Android host can optionally
+mirror a guest play through the phone vibrator. This host mirror is opt-in and
+does not replace the guest motor timing.
 `trace-bus=on` optionally logs register traffic (excluding RAM bytes).
 The device neither implements RPMsg/socket services nor changes their results.
 The original sensor driver, device registration and `vibratord` own that path.

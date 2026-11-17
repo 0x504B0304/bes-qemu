@@ -52,6 +52,7 @@ struct Aw86225State {
     bool calibrating;
     bool trace_bus;
     uint64_t ram_writes, ram_reads, plays, completions, calibrations;
+    uint64_t last_duration_ns;
 };
 
 static void aw86225_irq(Aw86225State *s)
@@ -79,6 +80,7 @@ static void aw86225_reset(DeviceState *dev)
     s->ram_address = s->pointer = 0;
     s->selected = false;
     s->ram_writes = s->ram_reads = s->plays = s->completions = s->calibrations = 0;
+    s->last_duration_ns = 0;
     aw86225_irq(s);
 }
 
@@ -186,6 +188,7 @@ static int aw86225_play(Aw86225State *s)
     }
     s->regs[REG_PLAYCFG4] = 1;
     s->plays++;
+    s->last_duration_ns = duration > 0 ? duration : 100000000;
     if (duration > 0) {
         timer_mod(s->play_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + duration);
     }
@@ -377,6 +380,7 @@ static void aw86225_init(Object *obj)
     object_property_add_uint64_ptr(obj, "plays", &s->plays, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "completions", &s->completions, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "calibrations", &s->calibrations, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-duration-ns", &s->last_duration_ns, OBJ_PROP_FLAG_READ);
 }
 
 static void aw86225_finalize(Object *obj)

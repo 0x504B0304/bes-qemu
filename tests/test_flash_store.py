@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import struct
 import subprocess
+import sys
 import tempfile
 
 repo=Path(__file__).resolve().parent
@@ -13,8 +14,10 @@ print(subprocess.check_output([compiler,'--version'],text=True).splitlines()[0])
 with tempfile.TemporaryDirectory(prefix='miband-store-test-') as tmp:
     tmp=Path(tmp);exe=tmp/('test.exe' if os.name=='nt' else 'test');state=tmp/'flash'
     flags=shlex.split(subprocess.check_output(['pkg-config','--cflags','--libs','glib-2.0','zlib'],text=True))
+    allocator_probe = ([str(repo/'test_flash_store_errno.c'), '-Wl,--wrap=g_malloc']
+                       if sys.platform.startswith('linux') else [])
     subprocess.run([compiler,'-Wall','-Wextra','-Wno-unused-parameter','-Werror',
-                    str(repo/'test_flash_store.c'),str(source_file('miband_store.c')),*include_flags(),*flags,'-o',str(exe)],check=True)
+                    str(repo/'test_flash_store.c'),str(source_file('miband_store.c')),*allocator_probe,*include_flags(),*flags,'-o',str(exe)],check=True)
     def run(mode,good=True,geometry=None):
         p=subprocess.run([str(exe),mode,str(state)] + ([geometry] if geometry else []),capture_output=True,text=True)
         assert (p.returncode==0)==good,(mode,p.stdout,p.stderr)

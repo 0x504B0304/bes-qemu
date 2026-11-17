@@ -1,0 +1,266 @@
+{
+  "schema": "bes.android.dependencies.v1",
+  "architecture": "aarch64",
+  "recipe_repository": "https://github.com/termux/termux-packages",
+  "packages": [
+    {
+      "name": "ca-certificates",
+      "version": "1:2026.11.05-1",
+      "size": 110148,
+      "sha256": "12fc350fc5ad638338b06b04835bce897615f8c93f96d30ac396cdb39b850c6b",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/c/ca-certificates/ca-certificates_1:2026.11.05-1_all.deb"
+    },
+    {
+      "name": "capstone",
+      "version": "5.0.9",
+      "size": 1467276,
+      "sha256": "4f2c4123364d0084699ebd61c9c6789e37da7b8831039b27d89cd2d6b98ea991",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/c/capstone/capstone_5.0.9_aarch64.deb"
+    },
+    {
+      "name": "gdb",
+      "version": "18.1-1",
+      "size": 4050108,
+      "sha256": "f4e8c1583b8dfc1f028b89f5f4009028657ec965a3d196ace319cdbd242b0328",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/gdb/gdb_18.1-1_aarch64.deb"
+    },
+    {
+      "name": "gdbm",
+      "version": "1.26-1",
+      "size": 150284,
+      "sha256": "c378de833aae3cf41f3028491ea11836479d9833ab653edc27d0c0e0e691d5c5",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/gdbm/gdbm_1.26-1_aarch64.deb"
+    },
+    {
+      "name": "glib",
+      "version": "2.90.1",
+      "size": 2573108,
+      "sha256": "132d8ce961d96a7252fd4bc2228bddd385b1b17b706a46caae6d541ae0e4b2c0",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/glib/glib_2.90.1_aarch64.deb"
+    },
+    {
+      "name": "guile",
+      "version": "3.0.11-1",
+      "size": 7632584,
+      "sha256": "c28b736842b1ac878fd4c585546fa084dd8cb5269b9d71d27a359fba077f23b9",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/guile/guile_3.0.11-1_aarch64.deb"
+    },
+    {
+      "name": "libandroid-posix-semaphore",
+      "version": "0.1-4",
+      "size": 4076,
+      "sha256": "0efa8677a0166315ba4e685863712eba0ca0a1732827492f38226e2723730c7a",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-posix-semaphore/libandroid-posix-semaphore_0.1-4_aarch64.deb"
+    },
+    {
+      "name": "libandroid-spawn",
+      "version": "0.3",
+      "size": 15216,
+      "sha256": "7988fa788ef48ab5da9660443905a2e4099ac36221739d72f5c39acc644b4d1c",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-spawn/libandroid-spawn_0.3_aarch64.deb"
+    },
+    {
+      "name": "libandroid-support",
+      "version": "29-1",
+      "size": 10880,
+      "sha256": "f2f145d6135ad4843ac9670153be3e3944dc1e6f1736d46d2306c28f2b86f517",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-support/libandroid-support_29-1_aarch64.deb"
+    },
+    {
+      "name": "libbz2",
+      "version": "1.0.8-8",
+      "size": 26116,
+      "sha256": "4335d7f060650b0aabef545d1334c2f9f280223d5962e13c24a00ec934b794ba",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libb/libbz2/libbz2_1.0.8-8_aarch64.deb"
+    },
+    {
+      "name": "libc++",
+      "version": "30",
+      "size": 341604,
+      "sha256": "53d0b84a7ba7459024257cb94d5b136fe13ef858567f65a8064b35950799f2ca",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libc++/libc++_30_aarch64.deb"
+    },
+    {
+      "name": "libcrypt",
+      "version": "0.2-6",
+      "size": 8880,
+      "sha256": "6c283eed576b98cc3568f99638156f8588f77d979579d03bef8683d6eb8601e1",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libcrypt/libcrypt_0.2-6_aarch64.deb"
+    },
+    {
+      "name": "libexpat",
+      "version": "2.10.0",
+      "size": 102436,
+      "sha256": "0e4411f01f6fb664f3f04f9420289472f9afc30db01ea1c5d1e57fd9fa2354be",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libe/libexpat/libexpat_2.10.0_aarch64.deb"
+    },
+    {
+      "name": "libffi",
+      "version": "3.8.0",
+      "size": 37592,
+      "sha256": "4f255badf74cd31f6a2801c17fa1444199c84c834b517b7c843e2fe9ebe91d77",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libf/libffi/libffi_3.8.0_aarch64.deb"
+    },
+    {
+      "name": "libgc",
+      "version": "8.2.12",
+      "size": 204712,
+      "sha256": "fcc33cf721160551eacc82b9305d0bcb7c85a6023cdcee2a54fddce9a0ad54cb",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libg/libgc/libgc_8.2.12_aarch64.deb"
+    },
+    {
+      "name": "libgmp",
+      "version": "6.3.0-2",
+      "size": 328368,
+      "sha256": "5a3c1325638946ca212ddcb89bffb2c4459b4c90757d6e69f820e176534037fa",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libg/libgmp/libgmp_6.3.0-2_aarch64.deb"
+    },
+    {
+      "name": "libiconv",
+      "version": "1.19.1",
+      "size": 562252,
+      "sha256": "a1c6323eff4f660e16ae6f5832356444b3269c19a4f61146355a49e7c4be5ed1",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libi/libiconv/libiconv_1.19.1_aarch64.deb"
+    },
+    {
+      "name": "liblzma",
+      "version": "5.8.4",
+      "size": 194796,
+      "sha256": "44e95e6e60dddb3705e60a344a4f009a1085a210797342b721eaff41b44033c0",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libl/liblzma/liblzma_5.8.4_aarch64.deb"
+    },
+    {
+      "name": "libmpfr",
+      "version": "4.2.2",
+      "size": 273848,
+      "sha256": "bd2a18f433321d7be49a4e86248696c0551a8df273b2a7c34ce729abe48ce15d",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libm/libmpfr/libmpfr_4.2.2_aarch64.deb"
+    },
+    {
+      "name": "libpixman",
+      "version": "0.46.4-1",
+      "size": 157712,
+      "sha256": "364b8c82ff68f8513930e5d413459fb7c52eccc7ba75a97a8c5a38760eee8d33",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libp/libpixman/libpixman_0.46.4-1_aarch64.deb"
+    },
+    {
+      "name": "libslirp",
+      "version": "4.9.7",
+      "size": 56168,
+      "sha256": "2dd2c214bcec7f1125fcd4040606e72768c38010ba87ed9c0365193616ba7ada",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libs/libslirp/libslirp_4.9.7_aarch64.deb"
+    },
+    {
+      "name": "libsqlite",
+      "version": "3.54.1-1",
+      "size": 768888,
+      "sha256": "661fb995f7215845007b222a85266ae99d9443e87e0604f8677edfd738e6b81a",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libs/libsqlite/libsqlite_3.54.1-1_aarch64.deb"
+    },
+    {
+      "name": "libthread-db",
+      "version": "22-2",
+      "size": 4272,
+      "sha256": "a172b8fc4a2bd7b7e5aae274e5bcd59215292639db7fb987fcc97a9f60f7f9cb",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libt/libthread-db/libthread-db_22-2_aarch64.deb"
+    },
+    {
+      "name": "libunistring",
+      "version": "1.5",
+      "size": 574056,
+      "sha256": "8853ca1421d6472046a0683d53084b26db1caa50a3aa2bf6422a1276c7dba69b",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libu/libunistring/libunistring_1.5_aarch64.deb"
+    },
+    {
+      "name": "ncurses",
+      "version": "6.6.20260307+really6.5.20250830",
+      "size": 557792,
+      "sha256": "f44bbfdc3d42ec0217bffa978309390e59cea5a48a9a83226d4a496c42ad0b99",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses/ncurses_6.6.20260307+really6.5.20250830_aarch64.deb"
+    },
+    {
+      "name": "ncurses-ui-libs",
+      "version": "6.6.20260307+really6.5.20250830",
+      "size": 32940,
+      "sha256": "7393f369009be189b3d4ec1f9b16ebd57621d6a1b22949ae07685573950d1f37",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses-ui-libs/ncurses-ui-libs_6.6.20260307+really6.5.20250830_aarch64.deb"
+    },
+    {
+      "name": "openssl",
+      "version": "1:3.6.5",
+      "size": 2482764,
+      "sha256": "a2fb7856875e63ef6b90442752e05974813372c3ca86d2513a78ea43c67a0f8b",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/o/openssl/openssl_1:3.6.5_aarch64.deb"
+    },
+    {
+      "name": "pcre2",
+      "version": "10.49",
+      "size": 1001320,
+      "sha256": "c27995e5f52b8ecc9b8b3e662eb08e49f82a18bfd3f34343936acc7b23964724",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/pcre2/pcre2_10.49_aarch64.deb"
+    },
+    {
+      "name": "python",
+      "version": "3.14.10",
+      "size": 4893180,
+      "sha256": "1a5a300c8d844f2c18a3bb61cafbffb2e93fba9a7106ebe967f06c9628d1e434",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python/python_3.14.10_aarch64.deb"
+    },
+    {
+      "name": "python-cryptography",
+      "version": "50.0.2",
+      "size": 1133776,
+      "sha256": "14c13359867626d15e457c8b8359c063b950ae96c7449b9c3d8551f4a35fe88f",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python-cryptography/python-cryptography_50.0.2_aarch64.deb"
+    },
+    {
+      "name": "python-pip",
+      "version": "26.3-1",
+      "size": 1122184,
+      "sha256": "c4ab1dd91a08ea7c9180be530bda56c57cfdf1ac17f6576c948224a5dc8806dc",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python-pip/python-pip_26.3-1_all.deb"
+    },
+    {
+      "name": "python-psutil",
+      "version": "7.2.2-2",
+      "size": 82672,
+      "sha256": "61147cf1b656b58e61f0293d25ecde85ca1a20b25f8d57338d424b649cddbef0",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python-psutil/python-psutil_7.2.2-2_aarch64.deb"
+    },
+    {
+      "name": "readline",
+      "version": "8.3.6",
+      "size": 294164,
+      "sha256": "616cc73009bc0223f61caed8dd09455714455aa5ea5e180126e2f69c4c775136",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/r/readline/readline_8.3.6_aarch64.deb"
+    },
+    {
+      "name": "resolv-conf",
+      "version": "1.3",
+      "size": 976,
+      "sha256": "ab541abac8e0c81709cd7ca4a02bcfa0d60ba1f4bfe7fd6dce4a694a4a9dfffa",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/r/resolv-conf/resolv-conf_1.3_aarch64.deb"
+    },
+    {
+      "name": "termux-licenses",
+      "version": "2.2",
+      "size": 52276,
+      "sha256": "a3265cd1cf7d04754f2fb683eaf5b21918263792fd714457127900c1d6d9bcd9",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/t/termux-licenses/termux-licenses_2.2_all.deb"
+    },
+    {
+      "name": "zlib",
+      "version": "1.4",
+      "size": 63780,
+      "sha256": "e3027565ae50bcd8ba5113c988b589754ae192c9cc3e6afbe3e4ed7c06b2598e",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zlib/zlib_1.4_aarch64.deb"
+    },
+    {
+      "name": "zstd",
+      "version": "1.5.7-1",
+      "size": 360488,
+      "sha256": "e1b4a5113648da8de189620ba1fce74c48b2d0833d9043391b9a1c91fb606fd3",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zstd/zstd_1.5.7-1_aarch64.deb"
+    }
+  ]
+}
