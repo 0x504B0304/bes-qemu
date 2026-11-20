@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
+#include "hw/qdev-core.h"
 #include "miband_peripherals.h"
 
 /* GPIO0 is not contiguous with GPIO1/2. reference configures GPIO27 at 0x40081000. */
@@ -171,7 +173,12 @@ bool miband_gpio_write(MiBandGpio *gpio, hwaddr address, unsigned size,
         } else if (address == base + 0x18) {
             gpio->irq_enable[bank] &= ~value;
         } else if (address == base + 0x1c) {
+            uint32_t added = value & ~gpio->irq_enable[bank];
             gpio->irq_enable[bank] |= value;
+            if (added && gpio->enable_traces++ < 64) {
+                qemu_log_mask(LOG_UNIMP, "miband GPIO irq-enable bank=%u "
+                              "added=%08x\n", bank, added);
+            }
         } else if (address == base + 0x30) {
             gpio->irq_mask[bank] &= ~value;
         } else if (address == base + 0x34) {
@@ -198,3 +205,44 @@ bool miband_gpio_pin_pending(MiBandGpio *gpio, unsigned pin)
     assert(pin < 96);
     return (gpio->status[pin / 32] & (1u << (pin % 32))) != 0;
 }
+
+/* QOM endpoint for board devices: "/machine/gpio" exposes named "input"
+ * lines like BEST1700, so -device peripherals can drive AP GPIO pins.
+ * The bank only models edge latches, so a rising level is one edge. */
+static void miband_gpio_port_input(void *opaque, int pin, int level)
+{
+    MiBandGpioPort *port = opaque;
+    unsigned bank = pin / 32;
+    uint32_t bit = 1u << (pin % 32);
+    bool was_high = port->gpio->input[bank] & bit;
+
+    miband_gpio_set_input(port->gpio, pin, level);
+    if (level && !was_high) {
+        miband_gpio_raise_edge(port->gpio, pin);
+    }
+}
+
+static void miband_gpio_port_init(Object *obj)
+{
+    qdev_init_gpio_in_named(DEVICE(obj), miband_gpio_port_input, "input", 96);
+}
+
+static void miband_gpio_port_class_init(ObjectClass *oc, void *data)
+{
+    DEVICE_CLASS(oc)->user_creatable = false;
+}
+
+static const TypeInfo miband_gpio_port_info = {
+    .name = TYPE_MIBAND_GPIO_PORT,
+    .parent = TYPE_DEVICE,
+    .instance_size = sizeof(MiBandGpioPort),
+    .instance_init = miband_gpio_port_init,
+    .class_init = miband_gpio_port_class_init,
+};
+
+static void miband_gpio_port_register_types(void)
+{
+    type_register_static(&miband_gpio_port_info);
+}
+
+type_init(miband_gpio_port_register_types)

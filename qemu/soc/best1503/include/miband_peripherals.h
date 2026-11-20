@@ -6,6 +6,7 @@
 #include "exec/hwaddr.h"
 #include "exec/memory.h"
 #include "hw/irq.h"
+#include "hw/qdev-core.h"
 #include "hw/i2c/i2c.h"
 #include "hw/core/cpu.h"
 #include "qemu/timer.h"
@@ -60,8 +61,14 @@ typedef struct MiBandIspi {
 
 typedef struct MiBandSpi {
     hwaddr base;
+    unsigned index;
+    uint32_t cr0, cr1;
     uint32_t rx_data;
     bool rx_ready;
+    bool cs_active;
+    unsigned cs_index;
+    struct SSIBus *bus;
+    unsigned trace_events;
 } MiBandSpi;
 
 typedef struct MiBandMemsc {
@@ -159,7 +166,14 @@ typedef struct MiBandGpio {
     uint32_t inferred_unmasked[3];
     unsigned edges;
     unsigned acks;
+    unsigned enable_traces;
 } MiBandGpio;
+
+#define TYPE_MIBAND_GPIO_PORT "best1503-gpio-port"
+typedef struct MiBandGpioPort {
+    DeviceState parent_obj;
+    MiBandGpio *gpio;
+} MiBandGpioPort;
 
 void miband_gpio_raise_inferred_edge(MiBandGpio *gpio, unsigned pin);
 bool miband_gpio_pin_pending(MiBandGpio *gpio, unsigned pin);
@@ -209,6 +223,8 @@ bool miband_ispi_write(MiBandIspi *ispi, hwaddr address, unsigned size,
                        uint64_t value);
 
 void miband_spi_init(MiBandSpi spi[2]);
+void miband_spi_expose_bus(MiBandSpi *spi, DeviceState *owner, unsigned index);
+void miband_spi_reset(MiBandSpi *spi);
 bool miband_spi_read(MiBandSpi spi[2], hwaddr address, unsigned size,
                      uint64_t *result);
 bool miband_spi_write(MiBandSpi spi[2], hwaddr address, unsigned size,

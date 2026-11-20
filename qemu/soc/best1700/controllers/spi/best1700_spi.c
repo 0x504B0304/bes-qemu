@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "hw/irq.h"
+#include "hw/ssi/ssi.h"
 #include "best1700_spi.h"
 
 #define SPI_ENABLE (1u << 1)
@@ -46,8 +48,9 @@ static void best1700_spi_schedule(Best1700Spi *s)
         if (!s->tx_count || !s->prescale || best1700_spi_bits(s) < 4) {
             return;
         }
-        /* The current bus has no endpoint. Dequeue a real transmitted word
-         * but never echo it or infer a sensor identity from its contents. */
+        /* Dequeue the transmitted word; an absent endpoint never echoes it
+         * or infers a sensor identity from its contents. */
+        s->active_tx = s->tx[s->tx_head];
         s->tx_head = (s->tx_head + 1) % BEST1700_SPI_MODEL_FIFO_DEPTH;
         s->tx_count--;
         s->active_bits = best1700_spi_bits(s);
@@ -73,7 +76,17 @@ static void best1700_spi_complete(void *opaque)
         unsigned tail = (s->rx_head + s->rx_count) %
                         BEST1700_SPI_MODEL_FIFO_DEPTH;
 
-        s->rx[tail] = best1700_spi_frame_mask(s->active_bits);
+        uint32_t mask = best1700_spi_frame_mask(s->active_bits);
+        uint32_t rx = mask;
+
+        if (s->bus && s->cs_active && ssi_get_cs(s->bus, s->cs_index)) {
+            rx = ssi_transfer(s->bus, s->active_tx & mask) & mask;
+        }
+        if (s->trace_events++ < 4096) {
+            qemu_log_mask(LOG_UNIMP, "best1700 %s SPI tx=%02x rx=%02x\n",
+                          s->name, s->active_tx & mask, rx);
+        }
+        s->rx[tail] = rx;
         s->rx_count++;
     } else if (s->diagnostics++ < 32) {
         /* No unverified overrun interrupt or status bit is fabricated. */
@@ -82,6 +95,45 @@ static void best1700_spi_complete(void *opaque)
     }
     s->active = false;
     best1700_spi_schedule(s);
+}
+
+static void best1700_spi_drive_cs(Best1700Spi *s, unsigned index, bool active)
+{
+    DeviceState *dev = s->bus ? ssi_get_cs(s->bus, index) : NULL;
+
+    if (dev) {
+        qemu_set_irq(qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0), !active);
+    }
+}
+
+/* Hardware chip select follows CR1 enable; CR1[10:7] selects the line, as
+ * on BEST1503. */
+static void best1700_spi_update_cs(Best1700Spi *s)
+{
+    bool active = s->cr1 & SPI_ENABLE;
+    unsigned index = (s->cr1 >> 7) & 0xf;
+
+    if (s->cs_active == active && (!active || s->cs_index == index)) {
+        return;
+    }
+    if (s->cs_active) {
+        best1700_spi_drive_cs(s, s->cs_index, false);
+    }
+    s->cs_active = active;
+    s->cs_index = index;
+    if (s->trace_events++ < 4096) {
+        qemu_log_mask(LOG_UNIMP, "best1700 %s SPI cs=%u cr1=%08x\n",
+                      s->name, active, s->cr1);
+    }
+    if (active) {
+        best1700_spi_drive_cs(s, index, true);
+    }
+}
+
+void best1700_spi_expose_bus(Best1700Spi *s, DeviceState *parent,
+                             const char *bus_name)
+{
+    s->bus = ssi_create_bus(parent, bus_name);
 }
 
 static MemTxResult best1700_spi_read(void *opaque, hwaddr offset,
@@ -140,6 +192,7 @@ static MemTxResult best1700_spi_write(void *opaque, hwaddr offset,
             return best1700_spi_unsupported(s, offset, true, value);
         }
         s->cr1 = value;
+        best1700_spi_update_cs(s);
         break;
     case 0x08: {
         unsigned tail;
@@ -236,6 +289,12 @@ void best1700_spi_reset(Best1700Spi *s)
     s->active_divider = 0;
     memset(s->tx, 0, sizeof(s->tx));
     memset(s->rx, 0, sizeof(s->rx));
+    s->active_tx = 0;
+    s->cs_active = false;
+    s->cs_index = 0;
+    for (unsigned index = 0; index < 16; index++) {
+        best1700_spi_drive_cs(s, index, false);
+    }
 }
 
 void best1700_spi_destroy(Best1700Spi *s)

@@ -3553,6 +3553,8 @@ static void best1700_init(MachineState *machine)
 
             best1700_spi_init(&s->bth_spi[i], OBJECT(s), name,
                                BEST1700_FAST_TIMER_HZ * 4);
+            g_autofree char *bus = g_strdup_printf("best1700-bth-spi%u", i);
+            best1700_spi_expose_bus(&s->bth_spi[i], DEVICE(&s->core[0].cpu), bus);
         }
         best1700_bth_timing_set_spi_clock_callback(&s->bth_timing,
             BEST1700_FAST_TIMER_HZ * 4, best1700_bth_spi_clock, s);

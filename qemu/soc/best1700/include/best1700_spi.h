@@ -27,6 +27,11 @@ typedef struct Best1700Spi {
     unsigned rx_count;
     unsigned diagnostics;
     bool active;
+    uint32_t active_tx;
+    bool cs_active;
+    unsigned cs_index;
+    unsigned trace_events;
+    struct SSIBus *bus;
     unsigned active_bits;
     uint32_t active_divider;
 } Best1700Spi;
@@ -36,6 +41,9 @@ typedef struct Best1700Spi {
  * attached yet, so the sampled input is high for every transferred bit. */
 void best1700_spi_init(Best1700Spi *s, Object *owner, const char *name,
                        uint32_t input_hz);
+/* Optional board SSI bus; peripherals attach with -device ...,bus=NAME. */
+void best1700_spi_expose_bus(Best1700Spi *s, DeviceState *parent,
+                             const char *bus_name);
 void best1700_spi_set_clock_hz(Best1700Spi *s, uint32_t input_hz);
 void best1700_spi_reset(Best1700Spi *s);
 void best1700_spi_destroy(Best1700Spi *s);

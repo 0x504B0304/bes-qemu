@@ -163,6 +163,7 @@ struct MiBandMachineState {
     MiBandBt bt;
     MiBandI2c i2c[MIBAND_I2C_COUNT];
     MiBandGpio gpio;
+    MiBandGpioPort gpio_port;
     MiBandTouch touch;
     MiBandZinitix zinitix;
     MiBandBoardGpioLine touch_irq_line;
@@ -265,6 +266,11 @@ static void miband_workers_exit(Notifier *notifier, void *data)
     miband_nand_free(s->flash_storage.nand);
     s->flash_storage.nor = NULL;
     s->flash_storage.nand = NULL;
+}
+
+static void miband_spi_machine_reset(void *opaque)
+{
+    miband_spi_reset(opaque);
 }
 
 static void miband_workers_reset(void *opaque)
@@ -966,6 +972,17 @@ static void miband_init(MachineState *machine)
     miband_gpu_connect_irq(&s->gpu, qdev_get_gpio_in(armv7m, GPU_IRQ));
     miband_lcdc_connect_irq(&s->lcdc, qdev_get_gpio_in(armv7m, LCDC_IRQ));
     miband_gpio_connect_irq(&s->gpio, qdev_get_gpio_in(armv7m, GPIO_IRQ));
+    /* Board devices added with -device reach AP pins through
+     * /machine/gpio and AP SPI masters through miband-ap-spiN. */
+    object_initialize_child(OBJECT(machine), "gpio", &s->gpio_port,
+                            TYPE_MIBAND_GPIO_PORT);
+    s->gpio_port.gpio = &s->gpio;
+    qdev_realize(DEVICE(&s->gpio_port), NULL, &error_fatal);
+    for (unsigned i = 0; i < ARRAY_SIZE(s->spi); i++) {
+        miband_spi_expose_bus(&s->spi[i], armv7m, i);
+        miband_spi_reset(&s->spi[i]);
+        qemu_register_reset(miband_spi_machine_reset, &s->spi[i]);
+    }
     miband_ispi_connect_pmu_irq(&s->ispi, qdev_get_gpio_in(armv7m, PMU_IRQ));
 
     if (s->gpu_worker) {

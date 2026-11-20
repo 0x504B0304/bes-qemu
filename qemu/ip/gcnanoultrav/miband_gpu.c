@@ -542,6 +542,7 @@ static void gpu_dump_draw_inputs(MiBandGpu *gpu, const uint8_t *data,
 
 typedef enum GpuSourceKind {
     GPU_SOURCE_A8_LINEAR,
+    GPU_SOURCE_INDEX4_POINT,
     GPU_SOURCE_INDEX8_POINT,
     GPU_SOURCE_INDEX8_BILINEAR,
     GPU_SOURCE_BGRA8888_POINT,
@@ -577,6 +578,12 @@ static bool gpu_source_layout(MiBandGpu *gpu, uint32_t format,
         *kind = GPU_SOURCE_A8_LINEAR;
         bytes = 1;
         break;
+    case 0x01000700:
+        /* VGLite INDEX_4, POINT: two texels per byte, first texel in the low
+         * nibble, sharing the INDEX8 CLUT at b00. N66TC uses it for the
+         * 64x16 notification-page handle (16-entry CLUT written to b00). */
+        *kind = GPU_SOURCE_INDEX4_POINT;
+        return (uint64_t)*memory_stride * 2 >= width;
     case 0x01000900:
         *kind = GPU_SOURCE_INDEX8_POINT;
         bytes = 1;
@@ -725,6 +732,11 @@ static uint32_t gpu_source_sample(MiBandGpu *gpu, const uint8_t *src,
         return miband_gpu_pixel_read(src + (size_t)y * stride + (size_t)x * 3,
                                       0x10a);
     }
+    if (kind == GPU_SOURCE_INDEX4_POINT) {
+        uint8_t pair = src[(size_t)y * stride + (size_t)x / 2];
+
+        return gpu->states[0xb00 + ((x & 1) ? pair >> 4 : pair & 0xf)];
+    }
     return gpu->states[0xb00 + src[(size_t)y * stride + x]];
 }
 
@@ -745,7 +757,8 @@ static uint32_t gpu_sample_source(MiBandGpu *gpu, const uint8_t *src,
                                   GpuSourceKind kind)
 {
     bool pad = kind == GPU_SOURCE_BGRA8888_LINEAR_PAD;
-    bool point = kind == GPU_SOURCE_INDEX8_POINT ||
+    bool point = kind == GPU_SOURCE_INDEX4_POINT ||
+                 kind == GPU_SOURCE_INDEX8_POINT ||
                  kind == GPU_SOURCE_BGRA8888_POINT ||
                  kind == GPU_SOURCE_BGR888_POINT ||
                  kind == GPU_SOURCE_BGR565_POINT ||
