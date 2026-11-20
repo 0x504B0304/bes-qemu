@@ -1442,6 +1442,7 @@ static void best1502p_init(MachineState *machine)
             miband_i2c_connect_irq(&s->touch_i2c[i],
                                   qdev_get_gpio_in(armv7m, i2c_irqs[i]));
         }
+        miband_i2c_expose_bus(&s->touch_i2c[i], armv7m, i);
         qemu_register_reset(miband_i2c_reset, &s->touch_i2c[i]);
     }
     /* reference UART table: UART1 0x4000c000 -> IRQ18, UART2 0x4000d000

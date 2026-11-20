@@ -25,6 +25,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Aw86225State, AW86225)
 #define REG_CONTCFG1 0x18
 #define REG_F0 0x25
 #define REG_CONT_F0 0x27
+#define REG_RAMBASEH 0x2d
+#define REG_RAMBASEL 0x2e
 #define REG_STATE 0x3f
 #define REG_RAMADDRH 0x40
 #define REG_RAMADDRL 0x41
@@ -126,6 +128,7 @@ static void aw86225_detect(void *opaque)
 static int64_t aw86225_wave_ns(Aw86225State *s)
 {
     uint64_t samples = 0;
+    unsigned base = ((s->regs[REG_RAMBASEH] & 0x0f) << 8) | s->regs[REG_RAMBASEL];
     unsigned hz;
     switch (s->regs[REG_SYSCTRL2] & 3) {
     case 2: hz = 24000; break;
@@ -149,7 +152,10 @@ static int64_t aw86225_wave_ns(Aw86225State *s)
             samples += wave * 128 * (loop + 1);
             continue;
         }
-        table = 1 + (wave - 1) * 4;
+        table = base + 1 + (wave - 1) * 4;
+        if (table + 3 >= RAM_SIZE) {
+            return 0;
+        }
         start = (s->ram[table] << 8) | s->ram[table + 1];
         end = (s->ram[table + 2] << 8) | s->ram[table + 3];
         if (end < start || end >= RAM_SIZE || start < table + 4) {
@@ -187,8 +193,10 @@ static int aw86225_play(Aw86225State *s)
         return -1; /* Streaming RTP and trigger mode are not yet implemented. */
     }
     s->regs[REG_PLAYCFG4] = 1;
-    s->plays++;
-    s->last_duration_ns = duration > 0 ? duration : 100000000;
+    if (!s->calibrating) {
+        s->plays++;
+        s->last_duration_ns = duration > 0 ? duration : 100000000;
+    }
     if (duration > 0) {
         timer_mod(s->play_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + duration);
     }
@@ -201,7 +209,7 @@ static bool aw86225_config_register(unsigned reg)
      * read-only result/status registers are deliberately not scratch RAM. */
     return (reg >= 0x03 && reg <= 0x24 && reg != REG_PLAYCFG4) ||
            (reg >= 0x2d && reg <= 0x31) || reg == 0x3a ||
-           reg == REG_SYSCTRL1 || reg == REG_SYSCTRL2 || reg == 0x49 ||
+           (reg >= REG_SYSCTRL1 && reg <= 0x49) || reg == 0x3c ||
            reg == 0x58 || reg == 0x5a || reg == 0x5b || reg == 0x77;
 }
 
@@ -310,6 +318,9 @@ static uint8_t aw86225_read(I2CSlave *dev)
     switch (reg) {
     case REG_RAMADDRH: return s->ram_address >> 8;
     case REG_RAMADDRL: return s->ram_address;
+    /* Band 9 and Band 10 select AW86225 with bits 0 and 6 clear,
+     * then require the factory-programmed marker in bit 7. */
+    case 0x64: return 0x80;
     case 0x65: return s->factory_osc_trim;
     case REG_SYSINT:
         value = s->regs[reg];

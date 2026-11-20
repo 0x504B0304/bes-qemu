@@ -6,6 +6,7 @@
 #include "exec/hwaddr.h"
 #include "exec/memory.h"
 #include "hw/irq.h"
+#include "hw/i2c/i2c.h"
 #include "hw/core/cpu.h"
 #include "qemu/timer.h"
 #include "miband_i2c_endpoint.h"
@@ -118,6 +119,7 @@ typedef struct MiBandI2c {
     qemu_irq irq;
     uint32_t regs[0x100 / 4];
     QEMUTimer *command_timer;
+    int64_t command_deadline;
     uint16_t command_fifo[16];
     unsigned command_head, command_count;
     uint32_t raw_intr;
@@ -136,6 +138,9 @@ typedef struct MiBandI2c {
     unsigned rx_count;
     MiBandI2cEndpoint endpoint;
     bool endpoint_active, endpoint_read;
+    I2CBus *external_bus;
+    bool external_read;
+    uint8_t external_address;
     struct MiBandCharger *charger;
 } MiBandI2c;
 
@@ -172,6 +177,7 @@ bool miband_gpio_write(MiBandGpio *gpio, hwaddr address, unsigned size,
 
 void miband_i2c_init(MiBandI2c i2c[MIBAND_I2C_COUNT]);
 void miband_i2c_connect_irq(MiBandI2c *i2c, qemu_irq irq);
+void miband_i2c_expose_bus(MiBandI2c *i2c, DeviceState *owner, unsigned index);
 void miband_i2c_reset(void *opaque);
 bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
                      unsigned size, uint64_t *result);

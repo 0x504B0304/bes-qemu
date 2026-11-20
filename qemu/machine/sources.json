@@ -179,6 +179,7 @@
     "qemu/bridges/display/miband_display_bridge.h",
     "qemu/board-devices/touch/cst9217/cst9217.c",
     "qemu/board-devices/haptics/aw86225/aw86225.c",
+    "qemu/board-devices/haptics/sih6889/sih6889.c",
     "qemu/board-devices/buttons/gpio-button/gpio_button.c",
     "qemu/bridges/host-input/keyboard/miband_keyboard.h",
     "qemu/bridges/host-input/keyboard/miband_keyboard.c",

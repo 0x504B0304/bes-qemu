@@ -57,6 +57,7 @@ class Aw86225Qtest(I2cTestCase):
 
     def test_burst_config_ram_fifo_and_bus_isolation(self):
         self.assertEqual(self.read_regs(0), b'\0')
+        self.assertEqual(self.read_regs(0x64), b'\x80')
         self.write_regs(0x0a, [1, 2, 3, 4])
         self.assertEqual(self.read_regs(0x0a, 4), bytes([1, 2, 3, 4]))
         self.write_regs(0x43, [8])
@@ -138,6 +139,21 @@ class Aw86225Qtest(I2cTestCase):
         self.write_regs(0, [0x32], accepted=False)
         self.write_regs(0x70, [99], accepted=False)
         self.assertEqual(self.read_regs(0), b'\0')
+
+    def test_ram_playback_uses_programmed_wave_table_base(self):
+        q = self.machine
+        self.prepare_wave()
+        self.write_regs(0x2d, [8, 0])
+        self.write_regs(0x43, [8])
+        self.ram_address(0x800)
+        # A different duration from the table at 0, to detect a fallback to it.
+        self.write_regs(0x42, [0x55, 8, 5, 9, 0xe4])
+        self.write_regs(0x43, [0])
+        self.write_regs(9, [1])
+        q.step(19_999_999)
+        self.assertEqual(self.read_regs(0x3f), b'\x07')
+        q.step(1)
+        self.assertEqual(self.read_regs(0x3f), b'\0')
 
     def test_wait_sequence_is_a_delay_not_an_invalid_wave_id(self):
         q = self.machine

@@ -942,6 +942,7 @@ static void miband_init(MachineState *machine)
             miband_i2c_connect_irq(&s->i2c[i],
                                   qdev_get_gpio_in(armv7m, i2c_irqs[i]));
         }
+        miband_i2c_expose_bus(&s->i2c[i], armv7m, i);
         qemu_register_reset(miband_i2c_reset, &s->i2c[i]);
     }
     /* The AP firmware uses interrupt-driven UART RX.  Wire the PL011 RX

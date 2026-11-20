@@ -37,6 +37,7 @@
 #define INTR_TX_EMPTY      (1u << 4)
 #define INTR_TX_OVER       (1u << 3)
 #define ABRT_7B_ADDR_NOACK (1u << 0)
+#define ABRT_TXDATA_NOACK   (1u << 3)
 #define STATUS_TFNF        (1u << 1)
 #define STATUS_TFE         (1u << 2)
 #define STATUS_RFNE        (1u << 3)
@@ -49,6 +50,7 @@
  * tx_bytes/tx_count are slave protocol bytes, not controller FIFO entries. */
 #define I2C_BYTE_NS 22500
 static void miband_i2c_command_done(void *opaque);
+static void miband_i2c_service(MiBandI2c *c);
 static void miband_i2c_update_irq(MiBandI2c *c)
 {
     c->raw_intr &= ~(INTR_TX_EMPTY | INTR_RX_FULL);
@@ -72,6 +74,9 @@ void miband_i2c_connect_irq(MiBandI2c *c, qemu_irq irq)
 
 static void miband_i2c_bus_reset(MiBandI2c *c)
 {
+    if (c->external_bus && i2c_bus_busy(c->external_bus)) {
+        i2c_end_transfer(c->external_bus);
+    }
     if (c->endpoint.reset) {
         c->endpoint.reset(c->endpoint.opaque);
     }
@@ -155,6 +160,12 @@ void miband_i2c_init(MiBandI2c i2c[MIBAND_I2C_COUNT])
     }
 }
 
+void miband_i2c_expose_bus(MiBandI2c *c, DeviceState *owner, unsigned index)
+{
+    g_autofree char *name = g_strdup_printf("miband-ap-i2c%u", index);
+    c->external_bus = i2c_init_bus(owner, name);
+}
+
 bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
                      unsigned size, uint64_t *result)
 {
@@ -171,6 +182,7 @@ bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
         return true;
     }
 
+    miband_i2c_service(c);
     switch (offset) {
     case IC_DATA_CMD:
         if (c->rx_count) {
@@ -253,6 +265,40 @@ bool miband_i2c_read(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
     return true;
 }
 
+static uint32_t miband_i2c_external_transfer(MiBandI2c *c, uint32_t command)
+{
+    bool read = command & (1u << 8);
+    unsigned address = c->regs[0x04 / 4] & 0x3ff;
+    I2CBus *bus = c->external_bus;
+    if (!bus || address > 0x7f) {
+        return ABRT_7B_ADDR_NOACK;
+    }
+    if (i2c_bus_busy(bus) && address != c->external_address) {
+        i2c_end_transfer(bus);
+    }
+    if (!i2c_bus_busy(bus) || read != c->external_read || (command & (1u << 10))) {
+        if (i2c_start_transfer(bus, address, read)) {
+            return ABRT_7B_ADDR_NOACK;
+        }
+        c->external_address = address;
+        c->external_read = read;
+    }
+    if (read) {
+        if (c->rx_count < ARRAY_SIZE(c->rx_fifo)) {
+            c->rx_fifo[(c->rx_head + c->rx_count) % ARRAY_SIZE(c->rx_fifo)] =
+                i2c_recv(bus);
+            c->rx_count++;
+            c->raw_intr |= INTR_RX_FULL;
+        }
+    } else if (i2c_send(bus, command & 0xff)) {
+        return ABRT_TXDATA_NOACK;
+    }
+    if (command & (1u << 9)) {
+        i2c_end_transfer(bus);
+    }
+    return 0;
+}
+
 static void miband_i2c_execute(MiBandI2c *c, uint32_t value)
 {
     bool endpoint_ack = c->endpoint.address &&
@@ -272,6 +318,7 @@ static void miband_i2c_execute(MiBandI2c *c, uint32_t value)
         c->raw_intr |= INTR_RX_OVER;
     }
 
+    uint32_t external_abort = 0;
     c->commands++;
     if (endpoint_ack) {
         bool read = value & (1u << 8);
@@ -331,9 +378,12 @@ static void miband_i2c_execute(MiBandI2c *c, uint32_t value)
             }
         }
     } else {
-        c->abort_source = ABRT_7B_ADDR_NOACK;
-        c->raw_intr |= INTR_TX_ABRT;
-        miband_i2c_bus_reset(c);
+        external_abort = miband_i2c_external_transfer(c, value);
+        if (external_abort) {
+            c->abort_source = external_abort;
+            c->raw_intr |= INTR_TX_ABRT;
+            miband_i2c_bus_reset(c);
+        }
     }
     if (value & (1u << 9)) {
         c->raw_intr |= INTR_STOP_DET;
@@ -344,24 +394,39 @@ static void miband_i2c_execute(MiBandI2c *c, uint32_t value)
                       " -> %s\n", c->base,
                       c->regs[0x04 / 4] & 0x3ff, value & 0x7ff,
                       endpoint_ack ? "device ACK" : charger_ack ? "charger ACK" :
-                      probe_ack ? "probe ACK" : "NACK");
+                      probe_ack ? "probe ACK" : external_abort ? "NACK" : "external ACK");
     }
 }
 
-static void miband_i2c_command_done(void *opaque)
+/* The AP can poll faster than the host dispatches timer callbacks. Complete
+ * bytes whose virtual deadlines have passed before reporting FIFO state. */
+static void miband_i2c_service(MiBandI2c *c)
 {
-    MiBandI2c *c = opaque;
-    if (c->command_count && (c->regs[IC_ENABLE / 4] & 1)) {
+    if (!c->command_count) {
+        return;
+    }
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (now < c->command_deadline) {
+        return;
+    }
+    do {
         uint16_t value = c->command_fifo[c->command_head];
         c->command_head = (c->command_head + 1) % ARRAY_SIZE(c->command_fifo);
         c->command_count--;
         miband_i2c_execute(c, value);
-        if (c->command_count) {
-            timer_mod(c->command_timer,
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + I2C_BYTE_NS);
-        }
+        c->command_deadline += I2C_BYTE_NS;
+    } while (c->command_count && now >= c->command_deadline);
+    if (c->command_count) {
+        timer_mod(c->command_timer, c->command_deadline);
+    } else {
+        timer_del(c->command_timer);
     }
     miband_i2c_update_irq(c);
+}
+
+static void miband_i2c_command_done(void *opaque)
+{
+    miband_i2c_service(opaque);
 }
 
 bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
@@ -380,6 +445,7 @@ bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
         return true;
     }
 
+    miband_i2c_service(c);
     if (offset == IC_DATA_CMD) {
         if (!(c->regs[IC_ENABLE / 4] & 1) ||
             (c->raw_intr & INTR_TX_ABRT)) {
@@ -391,8 +457,9 @@ bool miband_i2c_write(MiBandI2c i2c[MIBAND_I2C_COUNT], hwaddr address,
             c->command_fifo[(c->command_head + c->command_count) %
                             ARRAY_SIZE(c->command_fifo)] = value;
             if (!c->command_count++) {
-                timer_mod(c->command_timer,
-                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + I2C_BYTE_NS);
+                c->command_deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                      I2C_BYTE_NS;
+                timer_mod(c->command_timer, c->command_deadline);
             }
         }
     } else {
