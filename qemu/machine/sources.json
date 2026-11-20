@@ -184,6 +184,7 @@
     "qemu/board-devices/imu/common/miband_imu_motion.c",
     "qemu/board-devices/imu/lsm6dso/lsm6dso.c",
     "qemu/board-devices/imu/bmi2/bmi2.c",
+    "qemu/board-devices/imu/qmc6308/qmc6308.c",
     "qemu/board-devices/buttons/gpio-button/gpio_button.c",
     "qemu/bridges/host-input/keyboard/miband_keyboard.h",
     "qemu/bridges/host-input/keyboard/miband_keyboard.c",

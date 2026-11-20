@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""IMU parts on the BEST1503 AP SPI0 bus, driven through real controller
+"""IMU parts on the BEST1503 AP SPI0 bus (and the QMC6308 magnetometer on I2C5), driven through real controller
 registers: chip-select isolation (CR1[10:7]), LSM6DSO ID/FIFO/INT1 and the
 BMI220 config handshake, header FIFO and sensortime frame. Host motion is
 injected through the QOM "motion" property on a QMP socket.
@@ -214,11 +214,70 @@ def test_bmi220(qemu):
         m.close()
 
 
+def test_qmc6308(qemu):
+    """QMC6308 behind the AP I2C5 controller at 0x2c (Band 10 wiring)."""
+    base = 0x40063000
+    m = Machine(qemu, 'qmc6308,id=board-imu,bus=miband-ap-i2c5,address=0x2c')
+    try:
+        m.write32(base + 4, 0x2c)                         # IC_TAR
+        m.write32(base + 0x6c, 1)                         # IC_ENABLE
+
+        def transfer(*commands):
+            for command in commands:
+                m.write32(base + 0x10, command)
+                m.step_ms(1)
+            assert m.read32(base + 0x80) == 0, 'TX abort'
+
+        def read(reg, count):
+            transfer(reg, *([0x500] + [0x100] * (count - 2) + [0x300] if count > 1 else [0x700]))
+            return [m.read32(base + 0x10) & 0xff for _ in range(count)]
+
+        assert read(0x00, 1) == [0x80], 'CHIP_ID'
+        assert read(0x09, 1) == [0], 'suspended part has no data'
+        m.qmp('qom-set', {'path': '/machine/peripheral/board-imu', 'property': 'field',
+                          'value': '20 -30 -45'})
+        transfer(0x0b, 0x208)                            # range +-8 G (3750 LSB/G)
+        transfer(0x0a, 0x205)                            # normal mode, 50 Hz
+        assert m.prop('odr-mhz') == 50000
+        m.step_ms(25)
+        status, *data = read(0x09, 1) + read(0x01, 6)
+        assert status & 1, 'DRDY after one period'
+        assert struct.unpack('<hhh', bytes(data)) == (750, -1125, -1688), data
+        assert read(0x09, 1)[0] & 1 == 0, 'reading data clears DRDY'
+        transfer(0x0b, 0x280)                            # soft reset
+        assert read(0x0a, 1) == [0] and m.prop('odr-mhz') == 0
+    finally:
+        m.close()
+
+
+def test_motion_interpolation(qemu):
+    """Host updates are interpolated on the guest clock, one interval late."""
+    m = Machine(qemu, 'lsm6dso,id=board-imu,bus=miband-ap-spi0')
+    try:
+        put = lambda r, v: m.transaction([r, v])
+        out_x = lambda: struct.unpack('<h', bytes(m.transaction([0xa8, 0, 0])[1:]))[0]
+        put(0x10, 0x40)                                   # 104 Hz, +-2 g
+        m.motion(f'0 0 {G} 0 0 0')
+        m.step_ms(40)
+        m.motion(f'{G} 0 {G} 0 0 0')                      # 40 ms after the first
+        full = round(1000 / 0.061)
+        m.step_ms(20)
+        assert 0 < out_x() < full, 'midway between updates'
+        m.step_ms(40)
+        assert out_x() == full, 'settles on the latest update'
+        m.step_ms(500)
+        m.motion(f'{-G} 0 {G} 0 0 0')                     # after a >100 ms gap
+        m.step_ms(15)
+        assert out_x() == -full, 'long gaps are steps, not ramps'
+    finally:
+        m.close()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('qemu')
     a = p.parse_args()
-    for test in (test_lsm6dso, test_bmi220):
+    for test in (test_lsm6dso, test_bmi220, test_qmc6308, test_motion_interpolation):
         test(a.qemu)
         print(f'{test.__name__}: ok')
 
