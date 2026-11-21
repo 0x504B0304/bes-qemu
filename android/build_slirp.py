@@ -45,9 +45,10 @@ static const char *mbs_resolv_conf_path(void)
     path.write_text(text.replace(before, after))
     prefix = args.work/'sysroot/data/data/com.termux/files/usr'
     toolchain = args.ndk/'toolchains/llvm/prebuilt/linux-x86_64'
+    api = int(os.environ.get('ANDROID_API', '29'))
     cross = args.work/'slirp-cross.ini'
     cross.write_text(f'''[binaries]
-c = '{toolchain}/bin/aarch64-linux-android31-clang'
+c = '{toolchain}/bin/aarch64-linux-android{api}-clang'
 ar = '{toolchain}/bin/llvm-ar'
 strip = '{toolchain}/bin/llvm-strip'
 pkg-config = 'pkg-config'
