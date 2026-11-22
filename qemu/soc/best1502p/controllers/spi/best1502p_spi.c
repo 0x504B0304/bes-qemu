@@ -34,7 +34,15 @@ static void spi_execute(Best1502pSpi *spi, uint8_t opcode)
      * uses the normal three-byte command.  Reflect that wire length at the
      * package boundary so the NOR model can keep its protocol semantics
      * independent from controller register details. */
-    if (opcode == 0x9f && spi->regs[0x14 >> 2] == 0x00084000) {
+    /* Newer (NuttX 12.x, REDMI Watch 7) drivers also calibrate the sample
+     * delay by repeating this probe in mode 0x2N000 (N = delay step); it is
+     * the same dual-die read and expects the same six-byte encoding. */
+    /* Command bits 15..12 give the read length in nibbles: 0xc (six bytes,
+     * both dies) or 0x6 (three bytes, one die, e.g. the sensor-hub NOR). */
+    if (opcode == 0x9f && ((spi->regs[0] >> 12) & 0xf) == 0x6) {
+        rx_capacity = 3;
+    } else if (opcode == 0x9f && (spi->regs[0x14 >> 2] == 0x00084000 ||
+                           (spi->regs[0x14 >> 2] & ~0x7000u) == 0x00020000)) {
         rx_capacity = 6;
     } else if (opcode == 0x9f) {
         rx_capacity = 3;

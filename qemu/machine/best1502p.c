@@ -132,6 +132,7 @@ struct Best1502pMachineState {
     MemoryRegion flash_nc;
     MemoryRegion flash_c;
     MemoryRegion ram;
+    MemoryRegion sens_ram;          /* sensor-hub RAM seen by the AP */
     MemoryRegion ramx;
     MemoryRegion psram;
     MemoryRegion psram_nc;
@@ -170,8 +171,10 @@ struct Best1502pMachineState {
     uint32_t gpadc_input[8];
     MemoryRegion ispi;
     Best1502pSpi spi0_state;
+    Best1502pSpi spi_ext_state;     /* peripheral SPI, no device attached */
     Best1502pNor nor_state;
     MemoryRegion spi0;
+    MemoryRegion spi_ext;
     Best1502pPsram psram_ctrl_state;
     Best1502pMemsc aon_memsc_state;
     Best1502pMemsc cmu_memsc_state;
@@ -195,6 +198,9 @@ struct Best1502pMachineState {
     Best1700DsiState dsi;
     MemoryRegion gpu_region, lcdc_region;
     char *resource_image;
+    char *sensor_image;             /* sensor-hub NOR contents (REDMI Watch 7) */
+    uint8_t *sensor_flash;
+    Best1502pNor sensor_nor_state;
     GMappedFile *resource_map;
     MiBandNandDevice *nand;
     char *flash_state;
@@ -208,6 +214,7 @@ struct Best1502pMachineState {
     MemoryRegion nand_region;
     Best1502pMmio nand_mmio_state;
     uint32_t nand_id, nand_page_size, nand_spare_size;
+    uint32_t nor_jedec_id;          /* per-die JEDEC ID of the dual-die NOR */
     uint32_t nand_page_count, nand_pages_per_block;
     MiBandI2c touch_i2c[MIBAND_I2C_COUNT];
     MiBandCharger charger;
@@ -438,6 +445,18 @@ static void best1502p_open_storage(Best1502pMachineState *s)
     best1502p_ispi_open_rtc(&s->ispi_state, s->flash_state, digest);
 }
 
+static char *best1502p_get_sensor_image(Object *obj, Error **errp)
+{
+    return g_strdup(BEST1502P_MACHINE(obj)->sensor_image);
+}
+
+static void best1502p_set_sensor_image(Object *obj, const char *value, Error **errp)
+{
+    Best1502pMachineState *s = BEST1502P_MACHINE(obj);
+    g_free(s->sensor_image);
+    s->sensor_image = g_strdup(value);
+}
+
 static void best1502p_set_resource(Object *obj, const char *value, Error **errp)
 {
     Best1502pMachineState *s = BEST1502P_MACHINE(obj);
@@ -557,6 +576,22 @@ static void best1502p_display_init(Best1502pMachineState *s, MemoryRegion *sysme
     }
 }
 
+/* Unmodelled-register tracing is capped (default 4096 accesses); a
+ * diagnostic run may raise it with BEST1502P_MMIO_TRACE_LIMIT. */
+static uint32_t best1502p_mmio_trace_limit(void)
+{
+    static uint32_t limit;
+
+    if (!limit) {
+        const char *value = getenv("BEST1502P_MMIO_TRACE_LIMIT");
+        limit = value ? (uint32_t)strtoul(value, NULL, 0) : 4096;
+        if (!limit) {
+            limit = 4096;
+        }
+    }
+    return limit;
+}
+
 static uint64_t best1502p_mmio_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
@@ -601,7 +636,7 @@ static uint64_t best1502p_mmio_read(void *opaque, hwaddr offset,
                       " size=%u\n", offset, size);
         return 0;
     }
-    if (mmio->traces++ < 4096) {
+    if (mmio->traces++ < best1502p_mmio_trace_limit()) {
         uint32_t pc = current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0;
         qemu_log_mask(LOG_UNIMP,
                       "best1502p MMIO read %08" HWADDR_PRIx
@@ -659,7 +694,7 @@ static void best1502p_mmio_write(void *opaque, hwaddr offset,
     if (index < ARRAY_SIZE(mmio->words)) {
         mmio->words[index] = value;
     }
-    if (mmio->traces++ < 4096) {
+    if (mmio->traces++ < best1502p_mmio_trace_limit()) {
         uint32_t pc = current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0;
         qemu_log_mask(LOG_UNIMP,
                       "best1502p MMIO write %08" HWADDR_PRIx " <- %08" PRIx64
@@ -1208,6 +1243,14 @@ static void best1502p_init(MachineState *machine)
     memory_region_init_ram(&s->ram, NULL, "best1502p.ap-ram",
                            BEST1502P_RAM_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, BEST1502P_RAM_BASE, &s->ram);
+    if (s->sensor_image && *s->sensor_image) {
+        /* With a sensor hub present the AP maps its RAM after AP RAM
+         * (hal_cmu_sens_ram_cfg) and stages the hub boot data there. */
+        memory_region_init_ram(&s->sens_ram, NULL, "best1502p.sens-ram",
+                               0x00200000u, &error_fatal);
+        memory_region_add_subregion(sysmem, BEST1502P_RAM_BASE + BEST1502P_RAM_SIZE,
+                                    &s->sens_ram);
+    }
     memory_region_init_alias(&s->ramx, NULL, "best1502p.ap-ramx",
                              &s->ram, 0, BEST1502P_RAM_SIZE);
     memory_region_add_subregion(sysmem, BEST1502P_RAMX_BASE, &s->ramx);
@@ -1353,12 +1396,53 @@ static void best1502p_init(MachineState *machine)
     best1502p_nor_init(&s->nor_state,
                        memory_region_get_ram_ptr(&s->flash),
                        BEST1502P_FLASH_SIZE);
+    if (!s->nor_jedec_id || s->nor_jedec_id > 0xffffff) {
+        error_report("nor-jedec-id must be a non-zero 24-bit JEDEC ID");
+        exit(1);
+    }
+    /* Firmware derives the package size from this ID (two dies): REDMI Watch 6
+     * builds expect C8 60 18 (2 x 16 MiB), REDMI Watch 7 C8 60 17 (2 x 8 MiB). */
+    s->nor_state.jedec_id[0] = s->nor_jedec_id >> 16;
+    s->nor_state.jedec_id[1] = s->nor_jedec_id >> 8;
+    s->nor_state.jedec_id[2] = s->nor_jedec_id;
     best1502p_spi_set_nor(&s->spi0_state, &s->nor_state);
     memory_region_init_io(&s->spi0, NULL, &best1502p_spi_ops,
                           &s->spi0_state, "best1502p.spi0",
                           BEST1502P_SPI0_SIZE);
     memory_region_add_subregion_overlap(sysmem, BEST1502P_SPI0_BASE,
                                         &s->spi0, 3);
+    /* REDMI Watch 7 drives an NFC front end over the same SPI controller
+     * type at 0x50160000. No device answers: transfers complete and reads
+     * return zero, so the driver's probe fails instead of spinning on the
+     * transmit FIFO. REDMI Watch 6 never touches this controller. */
+    best1502p_spi_init(&s->spi_ext_state, 0x50160000u);
+    memory_region_init_io(&s->spi_ext, NULL, &best1502p_spi_ops,
+                          &s->spi_ext_state, "best1502p.spi-ext",
+                          BEST1502P_SPI0_SIZE);
+    memory_region_add_subregion_overlap(sysmem, 0x50160000u, &s->spi_ext, 3);
+    if (s->sensor_image && *s->sensor_image) {
+        /* The sensor hub boots from its own 8 MiB NOR on this controller;
+         * the AP opens it (sensor_hub_open) before starting that core. */
+        const uint32_t sensor_size = 8 * 1024 * 1024;
+        g_autofree gchar *contents = NULL;
+        gsize length = 0;
+        g_autoptr(GError) err = NULL;
+
+        if (!g_file_get_contents(s->sensor_image, &contents, &length, &err) ||
+            length > sensor_size) {
+            error_report("cannot load sensor-image: %s",
+                         err ? err->message : "larger than the 8 MiB sensor NOR");
+            exit(1);
+        }
+        s->sensor_flash = g_malloc(sensor_size);
+        memset(s->sensor_flash, 0xff, sensor_size);
+        memcpy(s->sensor_flash, contents, length);
+        best1502p_nor_init(&s->sensor_nor_state, s->sensor_flash, sensor_size);
+        s->sensor_nor_state.jedec_id[0] = 0xc8;
+        s->sensor_nor_state.jedec_id[1] = 0x60;
+        s->sensor_nor_state.jedec_id[2] = 0x17;
+        best1502p_spi_set_nor(&s->spi_ext_state, &s->sensor_nor_state);
+    }
 
     /* SDK cache control windows are outside the peripheral aperture.  Map
      * them as observable register banks so cache setup can proceed without a
@@ -1502,6 +1586,8 @@ static void best1502p_class_init(ObjectClass *oc, void *data)
                                    best1502p_set_skip_binding);
     object_class_property_add_str(oc, "resource-image", best1502p_get_resource,
                                   best1502p_set_resource);
+    object_class_property_add_str(oc, "sensor-image", best1502p_get_sensor_image,
+                                  best1502p_set_sensor_image);
     object_class_property_add_str(oc, "netdev", best1502p_get_netdev,
                                   best1502p_set_netdev);
     object_class_property_add_str(oc, "flash-state", best1502p_get_flash_state,
@@ -1547,6 +1633,8 @@ static void best1502p_instance_init(Object *obj)
                              best1502p_set_gpadc_input, NULL, (void *)(uintptr_t)ch);
     }
     object_property_add_uint32_ptr(obj, "nand-id", &s->nand_id, OBJ_PROP_FLAG_READWRITE);
+    s->nor_jedec_id = 0xc86018;
+    object_property_add_uint32_ptr(obj, "nor-jedec-id", &s->nor_jedec_id, OBJ_PROP_FLAG_READWRITE);
     s->touch_i2c_bus = s->touch_irq_pin = UINT32_MAX;
     object_property_add_uint32_ptr(obj, "touch-chip-id", &s->touch_chip_id, OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "touch-i2c-bus", &s->touch_i2c_bus, OBJ_PROP_FLAG_READWRITE);
