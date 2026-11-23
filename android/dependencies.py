@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Fetch a pinned Android/Bionic dependency sysroot (never desktop Linux libs).
 
+One lock per Termux architecture (aarch64, arm, i686, x86_64), matching the
+Android ABIs arm64-v8a, armeabi-v7a, x86 and x86_64.
+
 The lock is an explicit input, not a moving repository lookup during builds.
 Use --update-lock only when intentionally qualifying a new dependency set.
 Termux packages retain their notices; see the lock's source repository for
@@ -17,6 +20,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'https://packages.termux.dev/apt/termux-main/'
+ARCHITECTURES = ('aarch64', 'arm', 'i686', 'x86_64')
 ROOTS = ('glib', 'libpixman', 'libslirp', 'gdb', 'python-cryptography',
          'python-psutil', 'capstone', 'termux-licenses')
 
@@ -31,7 +35,7 @@ def records(text):
     return result
 
 
-def create_lock(index):
+def create_lock(index, architecture):
     pending, selected = list(ROOTS), {}
     while pending:
         name = pending.pop()
@@ -44,7 +48,7 @@ def create_lock(index):
             choices = [re.split(r'\s|\(', value.strip())[0] for value in dependency.split('|')]
             if choices != ['']:
                 pending.append(next(value for value in choices if value in index))
-    return dict(schema='bes.android.dependencies.v1', architecture='aarch64',
+    return dict(schema='bes.android.dependencies.v1', architecture=architecture,
                 recipe_repository='https://github.com/termux/termux-packages',
                 packages=[selected[name] for name in sorted(selected)])
 
@@ -66,15 +70,19 @@ def fetch(item, cache):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--lock', type=Path, default=ROOT / 'dependencies.lock.json')
+    parser.add_argument('--arch', choices=ARCHITECTURES, default='aarch64')
+    parser.add_argument('--lock', type=Path)
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--sysroot', type=Path, required=True)
     parser.add_argument('--update-lock', type=Path, metavar='PACKAGES_INDEX')
     args = parser.parse_args()
+    args.lock = args.lock or ROOT / f'dependencies-{args.arch}.lock.json'
     if args.update_lock:
-        args.lock.write_text(json.dumps(create_lock(records(args.update_lock.read_text())), indent=2) + '\n')
+        lock = create_lock(records(args.update_lock.read_text()), args.arch)
+        args.lock.write_text(json.dumps(lock, indent=2) + '\n')
+        return
     lock = json.loads(args.lock.read_text())
-    if lock['schema'] != 'bes.android.dependencies.v1' or lock['architecture'] != 'aarch64':
+    if lock['schema'] != 'bes.android.dependencies.v1' or lock['architecture'] != args.arch:
         raise ValueError('unsupported Android dependency lock')
     args.cache.mkdir(parents=True, exist_ok=True)
     args.sysroot.mkdir(parents=True, exist_ok=True)

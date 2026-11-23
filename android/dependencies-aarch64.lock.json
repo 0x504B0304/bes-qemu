@@ -96,10 +96,10 @@
     },
     {
       "name": "libffi",
-      "version": "3.8.0",
-      "size": 37592,
-      "sha256": "4f255badf74cd31f6a2801c17fa1444199c84c834b517b7c843e2fe9ebe91d77",
-      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libf/libffi/libffi_3.8.0_aarch64.deb"
+      "version": "3.8.1",
+      "size": 35808,
+      "sha256": "9e13f3b5c40625c384101992bb669a278e07d9e2baa37d286d7ed164288fab1a",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libf/libffi/libffi_3.8.1_aarch64.deb"
     },
     {
       "name": "libgc",

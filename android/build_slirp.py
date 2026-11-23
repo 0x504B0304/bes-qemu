@@ -15,12 +15,20 @@ SOURCE = {
     'url': 'https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.7/libslirp-v4.9.7.tar.gz',
     'sha256': 'd2567fa06a6357c7755d61c67293b2c0bf069b3f2173bde6b76cf768529a1938',
 }
+# Android ABI -> (clang target prefix, Meson cpu_family, Meson cpu)
+ABIS = {
+    'arm64-v8a': ('aarch64-linux-android', 'aarch64', 'aarch64'),
+    'armeabi-v7a': ('armv7a-linux-androideabi', 'arm', 'armv7'),
+    'x86_64': ('x86_64-linux-android', 'x86_64', 'x86_64'),
+    'x86': ('i686-linux-android', 'x86', 'i686'),
+}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--ndk', type=Path, required=True)
+    parser.add_argument('--abi', choices=sorted(ABIS), default='arm64-v8a')
     args = parser.parse_args()
     cache = args.work/'packages/cache'; cache.mkdir(parents=True, exist_ok=True)
     archive = cache/'libslirp-v4.9.7.tar.gz'
@@ -45,17 +53,18 @@ static const char *mbs_resolv_conf_path(void)
     path.write_text(text.replace(before, after))
     prefix = args.work/'sysroot/data/data/com.termux/files/usr'
     toolchain = args.ndk/'toolchains/llvm/prebuilt/linux-x86_64'
-    api = int(os.environ.get('ANDROID_API', '29'))
+    api = int(os.environ.get('ANDROID_API', '26'))
+    target, family, cpu = ABIS[args.abi]
     cross = args.work/'slirp-cross.ini'
     cross.write_text(f'''[binaries]
-c = '{toolchain}/bin/aarch64-linux-android{api}-clang'
+c = '{toolchain}/bin/{target}{api}-clang'
 ar = '{toolchain}/bin/llvm-ar'
 strip = '{toolchain}/bin/llvm-strip'
 pkg-config = 'pkg-config'
 [host_machine]
 system = 'android'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
+cpu_family = '{family}'
+cpu = '{cpu}'
 endian = 'little'
 [built-in options]
 c_args = ['-O2', '-ffile-prefix-map={source}=libslirp']
@@ -74,7 +83,7 @@ c_link_args = ['-L{prefix}/lib', '-Wl,-rpath-link,{prefix}/lib', '-Wl,-z,max-pag
     shutil.copy2(binary, target)
     notices = prefix/'share/doc/libslirp'; notices.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source/'COPYRIGHT', notices/'COPYRIGHT.android-source')
-    record = dict(source=SOURCE, patch='app-private-resolv-conf-v1',
+    record = dict(source=SOURCE, patch='app-private-resolv-conf-v1', abi=args.abi, minimum_api=api,
                   patched_source_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
     (args.work/'sysroot/android-native-overrides.json').write_text(json.dumps({'libslirp': record}, indent=2)+'\n')
